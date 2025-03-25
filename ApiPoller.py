@@ -41,15 +41,20 @@ def load_config():
 def check_for_new_messages(config):
     print("Checking for new messages...")
     headers = {"Authorization": config["printer_token"]}
-    response = requests.get(config["url"] + config["request_url"], headers=headers)
-    
-    if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
-        print("New message found")
-        parse_message(config, response.json())
-    elif response.status_code == 201:
-        print("No new messages found")
-    else:
-        print(f"Error: {response.status_code}")
+    while True:
+        try:
+            response = requests.get(config["url"] + config["request_url"], headers=headers, timeout=10)
+            if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
+                print("New message found")
+                parse_message(config, response.json())
+            elif response.status_code == 201:
+                print("No new messages found")
+            else:
+                print(f"Error: {response.status_code}")
+            break
+        except requests.exceptions.RequestException:
+            print("Connection lost. Retrying in 5 seconds...")
+            time.sleep(5)
 
 def parse_message(config, data):
     message_id = data.get("id")
@@ -59,15 +64,20 @@ def parse_message(config, data):
 def get_image(config, message_id):
     print("Getting image...")
     headers = {"Authorization": config["printer_token"]}
-    response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=headers, stream=True)
-    
-    if response.status_code == 200 and 'image' in response.headers.get('Content-Type', ''):
-        print("Image pulled.")
-        save_image(config, response, message_id)
-    elif response.status_code == 201:
-        print("No new messages found")
-    else:
-        print(f"Error: {response.status_code}")
+    while True:
+        try:
+            response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=headers, stream=True, timeout=10)
+            if response.status_code == 200 and 'image' in response.headers.get('Content-Type', ''):
+                print("Image pulled.")
+                save_image(config, response, message_id)
+            elif response.status_code == 201:
+                print("No new messages found")
+            else:
+                print(f"Error: {response.status_code}")
+            break
+        except requests.exceptions.RequestException:
+            print("Connection lost. Retrying in 5 seconds...")
+            time.sleep(5)
 
 def save_image(config, response, message_id):
     mime = response.headers['Content-Type'].split('/')[1]
@@ -88,8 +98,14 @@ def save_image(config, response, message_id):
 def ack_message(config, message_id):
     print(f"Acknowledging message ID: {message_id}")
     headers = {"Authorization": config["printer_token"]}
-    response = requests.post(f"{config['url']}{config['ack_url']}?message_id={message_id}", headers=headers)
-    print(response.text)
+    while True:
+        try:
+            response = requests.post(f"{config['url']}{config['ack_url']}?message_id={message_id}", headers=headers, timeout=10)
+            print(response.text)
+            break
+        except requests.exceptions.RequestException:
+            print("Connection lost. Retrying in 5 seconds...")
+            time.sleep(5)
 
 def print_image(image_path):
     if not os.path.exists(image_path):
