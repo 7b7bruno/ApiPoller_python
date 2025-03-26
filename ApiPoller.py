@@ -39,7 +39,7 @@ def load_config():
     return config
 
 def check_for_new_messages(config):
-    print("Checking for new messages...")
+    print("[" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "] " + "Checking for new messages...")
     headers = {"Authorization": config["printer_token"]}
     while True:
         try:
@@ -119,7 +119,7 @@ def print_image(image_path):
         print(f"Error processing image: {e}")
         return
     
-    command = ["lp", "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
+    command = ["cups.lp", "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
     subprocess.run(command)
 
 def raise_flag():
