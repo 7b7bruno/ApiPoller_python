@@ -16,12 +16,12 @@ BUTTON_PIN = 23
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         default_config = {
-            "printer_token": "<TOKEN>",
-            "url": "http://stripe.test/api",
+            "printer_token": "<INSERT TOKEN HERE>",
+            "url": "https://senior-gimenio.eu/api",
             "request_url": "/message/request",
             "ack_url": "/message/ack",
             "image_url": "/message/image",
-            "check_interval": 1,
+            "check_interval": 30,
             "image_path": "images/"
         }
         with open(CONFIG_FILE, 'w') as f:
@@ -138,13 +138,6 @@ def raise_flag():
     
     print("Raising flag...")
     set_servo_angle(180)
-    
-    print("Waiting for button press...")
-    while GPIO.input(BUTTON_PIN):
-        time.sleep(0.1)
-    
-    print("Lowering flag...")
-    set_servo_angle(0)
     
     GPIO.cleanup()
 
