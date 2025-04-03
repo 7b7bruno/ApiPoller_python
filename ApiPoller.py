@@ -53,7 +53,7 @@ def load_config():
     return config
 
 def check_for_new_messages(config):
-    print("Checking for new messages...")
+    print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
     # log_event("Checking for new messages...")
     headers = {"Authorization": config["printer_token"]}
     while True:
@@ -64,7 +64,7 @@ def check_for_new_messages(config):
                 parse_message(config, response.json())
             elif response.status_code == 201:
                 # log_event("No new messages found")
-                print("No new messages found")
+                print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
             else:
                 log_error(f"Error: {response.status_code}")
             break
@@ -173,6 +173,7 @@ def generate_file_name(directory, mime):
 
 if __name__ == "__main__":
     config = load_config()
+    log_event("Gimenio started")
     while True:
         try:
             check_for_new_messages(config)
