@@ -134,7 +134,7 @@ def print_image(image_path):
     try:
         image = Image.open(image_path)
         orientation_option = "-o landscape" if image.width >= image.height else "-o portrait"
-        command = ["lp", "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
+        command = ["cups.lp", "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
         subprocess.run(command)
     except Exception as e:
         log_error(f"Error processing image: {e}")
