@@ -182,6 +182,7 @@ def init_servo():
     servo.detach()
 
 if __name__ == "__main__":
+    GPIO.setmode(GPIO.BCM)
     init_servo()
     config = load_config()
     log_event("Gimenio started")
