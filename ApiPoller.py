@@ -72,7 +72,9 @@ def check_supply_levels():
 def check_for_refill():
     """Poll API endpoint to check if printer has been refilled."""
     try:
-        response = requests.get("https://senior-gimenio.eu/api/printer/refill", timeout=10)
+        config = load_config()
+        headers = {"Authorization": config["printer_token"]}
+        response = requests.get("https://senior-gimenio.eu/api/printer/refill", timeout=10, headers=headers)
         if response.status_code == 200:
             refill_data = response.json()
             log_event("Response: " + refill_data)
