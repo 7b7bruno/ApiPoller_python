@@ -152,6 +152,7 @@ def raise_flag():
         return
     flag_raised = True
     try:
+        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         def set_servo_angle(angle):
             global servo
             servo.angle = angle
