@@ -149,11 +149,10 @@ def raise_flag():
         return
     flag_raised = True
     try:
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(SERVO_PIN, GPIO.OUT)
-        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        
         def set_servo_angle(angle):
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(SERVO_PIN, GPIO.OUT)
+            GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             pwm = GPIO.PWM(SERVO_PIN, 50)
             pwm.start(0)
             duty_cycle = (angle / 18.0) + 2.5
@@ -170,7 +169,7 @@ def raise_flag():
             time.sleep(0.1)
         
         log_event("Lowering flag...")
-        set_servo_angle(0)
+        set_servo_angle(10)
         GPIO.cleanup()
         flag_raised = False
     except Exception as e:
