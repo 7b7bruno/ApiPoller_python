@@ -197,7 +197,7 @@ def update_led_status():
     global flag_raised
     while True:
         if flag_raised:
-            set_led_color(1, 1, 0)  # Yellow (message received, flag raised)
+            set_led_color(0, 0, 1)  # Blue (message received, flag raised)
         else:
             set_led_color(0, 1, 0)  # Green (normal operation)
         time.sleep(0.5)
