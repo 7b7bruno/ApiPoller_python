@@ -12,6 +12,7 @@ import threading
 from gpiozero import AngularServo
 
 CONFIG_FILE = "config.json"
+STATUS_FILE = "printer_status.json"
 LOG_FILE = "app.log"
 SERVO_PIN = 14
 BUTTON_PIN = 4
@@ -19,6 +20,10 @@ BUTTON_PIN = 4
 RED_PIN = 22
 GREEN_PIN = 27
 BLUE_PIN = 17
+
+PAPER_CAPACITY = 18
+INK_CAPACITY = 54
+
 
 servo = AngularServo(SERVO_PIN, min_angle=0, max_angle=180, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
 
@@ -36,11 +41,60 @@ def log_error(message):
     print(f"ERROR: {message}")
     logging.error(message)
 
+def load_status():
+    """Load printer status from file, create default if missing."""
+    if not os.path.exists(STATUS_FILE):
+        status = {"paper": PAPER_CAPACITY, "ink": INK_CAPACITY}
+        save_status(status)
+    else:
+        with open(STATUS_FILE, 'r') as f:
+            status = json.load(f)
+    return status
+
+def save_status(status):
+    """Save printer status to file."""
+    with open(STATUS_FILE, 'w') as f:
+        json.dump(status, f, indent=4)
+
+def check_supply_levels():
+    """Check if ink or paper is empty and stop operation if needed."""
+    status = load_status()
+    if status["paper"] == 0 or status["ink"] == 0:
+        log_event("Printer out of paper or ink. Stopping operation.")
+        set_led_color(1, 0, 0)  # Turn LED red
+        while not check_for_refill():
+            log_event("Waiting for refill...")
+            time.sleep(10)  # Poll every 10 seconds
+        log_event("Printer refilled. Resuming operation.")
+        set_led_color(0, 1, 0)  # Turn LED green
+    return status
+
+def check_for_refill():
+    """Poll API endpoint to check if printer has been refilled."""
+    try:
+        response = requests.get("https://senior-gimenio.eu/api/printer/refill", timeout=10)
+        if response.status_code == 200:
+            refill_data = response.json()
+            if refill_data.get("paper_refilled", False):
+                log_event("Paper refilled")
+                status = load_status()
+                status["paper"] = PAPER_CAPACITY
+                save_status(status)
+            if refill_data.get("ink_refilled", False):
+                log_event("Ink refilled")
+                status = load_status()
+                status["ink"] = INK_CAPACITY
+                save_status(status)
+            return True
+    except requests.exceptions.RequestException as e:
+        log_error(f"Error checking refill status: {e}")
+    return False
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         default_config = {
             "printer_token": "<TOKEN>",
-            "url": "http://stripe.test/api",
+            "url": "https://senior-gimenio.eu/api",
             "request_url": "/message/request",
             "ack_url": "/message/ack",
             "image_url": "/message/image",
@@ -141,11 +195,20 @@ def print_image(image_path):
         log_error("Image file not found, skipping print...")
         return
     
+    status = check_supply_levels()
+    if status["paper"] == 0 or status["ink"] == 0:
+        log_error("Cannot print, out of supplies.")
+        return
+
     try:
         image = Image.open(image_path)
         orientation_option = "-o landscape" if image.width >= image.height else "-o portrait"
         command = ["cups.lp", "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
         subprocess.run(command)
+        status["paper"] -= 1
+        status["ink"] -= 1
+        save_status(status)
+        log_event(f"Printed successfully. Remaining: {status['paper']} pages, {status['ink']} ink units.")
     except Exception as e:
         log_error(f"Error processing image: {e}")
 
@@ -221,6 +284,7 @@ if __name__ == "__main__":
     log_event("Gimenio started")
     while True:
         try:
+            check_supply_levels()
             check_for_new_messages(config)
             time.sleep(config["check_interval"])
         except Exception as e:
