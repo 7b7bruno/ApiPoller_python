@@ -9,11 +9,14 @@ from PIL import Image
 import subprocess
 import RPi.GPIO as GPIO
 import threading
+from gpiozero import AngularServo
 
 CONFIG_FILE = "config.json"
 LOG_FILE = "app.log"
 SERVO_PIN = 14
 BUTTON_PIN = 4
+
+servo = AngularServo(SERVO_PIN, min_angle=0, max_angle=180, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
 
 flag_raised = False
 
@@ -150,16 +153,10 @@ def raise_flag():
     flag_raised = True
     try:
         def set_servo_angle(angle):
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(SERVO_PIN, GPIO.OUT)
-            GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            pwm = GPIO.PWM(SERVO_PIN, 50)
-            pwm.start(0)
-            duty_cycle = (angle / 18.0) + 2.5
-            pwm.ChangeDutyCycle(duty_cycle)
-            time.sleep(0.5)
-            pwm.stop()
-            GPIO.setup(SERVO_PIN, GPIO.IN)  # Disable the servo by setting GPIO to input mode
+            global servo
+            servo.angle = angle
+            time.sleep(1)
+            servo.detach()
         
         log_event("Raising flag...")
         set_servo_angle(180)
@@ -178,7 +175,14 @@ def generate_file_name(directory, mime):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return os.path.join(directory, f"{timestamp}.{mime}")
 
+def init_servo():
+    global servo
+    servo.angle = 10
+    time.sleep(1)
+    servo.detach()
+
 if __name__ == "__main__":
+    init_servo()
     config = load_config()
     log_event("Gimenio started")
     while True:
