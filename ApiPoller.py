@@ -16,6 +16,10 @@ LOG_FILE = "app.log"
 SERVO_PIN = 14
 BUTTON_PIN = 4
 
+RED_PIN = 22
+GREEN_PIN = 27
+BLUE_PIN = 17
+
 servo = AngularServo(SERVO_PIN, min_angle=0, max_angle=180, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
 
 flag_raised = False
@@ -181,6 +185,30 @@ def init_servo():
     servo.angle = 10
     time.sleep(1)
     servo.detach()
+
+# Function to control LED color
+def set_led_color(red, green, blue):
+    GPIO.output(RED_PIN, red)
+    GPIO.output(GREEN_PIN, green)
+    GPIO.output(BLUE_PIN, blue)
+
+# Function to update LED status based on flag state
+def update_led_status():
+    global flag_raised
+    while True:
+        if flag_raised:
+            set_led_color(1, 1, 0)  # Yellow (message received, flag raised)
+        else:
+            set_led_color(0, 1, 0)  # Green (normal operation)
+        time.sleep(0.5)
+
+def init_led():
+    GPIO.setup(RED_PIN, GPIO.OUT)
+    GPIO.setup(GREEN_PIN, GPIO.OUT)
+    GPIO.setup(BLUE_PIN, GPIO.OUT)
+
+    led_thread = threading.Thread(target=update_led_status, daemon=True)
+    led_thread.start()
 
 if __name__ == "__main__":
     GPIO.setmode(GPIO.BCM)
