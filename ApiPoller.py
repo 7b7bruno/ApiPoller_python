@@ -210,13 +210,13 @@ def init_led():
     led_thread = threading.Thread(target=update_led_status, daemon=True)
     led_thread.start()
 
-def init_button():
+def init_GPIO():
     GPIO.setmode(GPIO.BCM)
 
 if __name__ == "__main__":
+    init_GPIO()
     init_led()
     init_servo()
-    init_button()
     config = load_config()
     log_event("Gimenio started")
     while True:
