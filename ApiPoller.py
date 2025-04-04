@@ -12,8 +12,10 @@ import threading
 
 CONFIG_FILE = "config.json"
 LOG_FILE = "app.log"
-SERVO_PIN = 18
-BUTTON_PIN = 23
+SERVO_PIN = 14
+BUTTON_PIN = 4
+
+flag_raised = False
 
 # Setup logging
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
@@ -109,7 +111,8 @@ def save_image(config, response, message_id):
         log_event(f"Image saved to {image_path}")
         ack_message(config, message_id)
         print_image(image_path)
-        threading.Thread(target=raise_flag, daemon=True).start()
+        if not flag_raised:
+            threading.Thread(target=raise_flag, daemon=True).start()
     except Exception as e:
         log_error(f"Error saving image: {e}")
 
@@ -140,6 +143,11 @@ def print_image(image_path):
         log_error(f"Error processing image: {e}")
 
 def raise_flag():
+    global flag_raised
+    if flag_raised:
+        log_error("Flag already raised, skipping...")
+        return
+    flag_raised = True
     try:
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(SERVO_PIN, GPIO.OUT)
@@ -157,13 +165,14 @@ def raise_flag():
         log_event("Raising flag...")
         set_servo_angle(180)
         
-        # log_event("Waiting for button press...")
-        # while GPIO.input(BUTTON_PIN):
-        #     time.sleep(0.1)
+        log_event("Waiting for button press...")
+        while GPIO.input(BUTTON_PIN):
+            time.sleep(0.1)
         
-        # log_event("Lowering flag...")
-        # set_servo_angle(0)
+        log_event("Lowering flag...")
+        set_servo_angle(0)
         GPIO.cleanup()
+        flag_raised = False
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
 
