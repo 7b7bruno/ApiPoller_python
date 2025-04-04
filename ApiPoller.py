@@ -170,7 +170,6 @@ def raise_flag():
         
         log_event("Lowering flag...")
         set_servo_angle(10)
-        GPIO.cleanup()
         flag_raised = False
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
