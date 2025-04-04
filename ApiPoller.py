@@ -118,7 +118,13 @@ def load_config():
 def check_for_new_messages(config):
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
     # log_event("Checking for new messages...")
-    headers = {"Authorization": config["printer_token"]}
+
+    status = load_status()
+    headers = {
+        "Authorization": config["printer_token"],
+        "X-Paper-Remaining": str(status["paper"]),
+        "X-Ink-Remaining": str(status["ink"])
+    }
     while True:
         try:
             response = requests.get(config["url"] + config["request_url"], headers=headers, timeout=10)
