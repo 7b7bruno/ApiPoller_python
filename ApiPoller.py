@@ -75,6 +75,7 @@ def check_for_refill():
         response = requests.get("https://senior-gimenio.eu/api/printer/refill", timeout=10)
         if response.status_code == 200:
             refill_data = response.json()
+            log_event("Response: " + refill_data)
             if refill_data.get("paper_refilled", False):
                 log_event("Paper refilled")
                 status = load_status()
