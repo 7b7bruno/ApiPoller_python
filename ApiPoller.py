@@ -211,7 +211,7 @@ def print_image(image_path):
     try:
         image = Image.open(image_path)
         orientation_option = "-o landscape" if image.width >= image.height else "-o portrait"
-        command = ["cups.lp", "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
+        command = ["/snap/bin/cups.lp", "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
         subprocess.run(command)
         status["paper"] -= 1
         status["ink"] -= 1
