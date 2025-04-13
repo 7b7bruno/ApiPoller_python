@@ -1,0 +1,9 @@
+{
+    "printer_token": "0T2QAZn7XIDGesq047aP5PLmlaPOs73L",
+    "url": "https://senior-gimenio.eu/api",
+    "request_url": "/message/request",
+    "ack_url": "/message/ack",
+    "image_url": "/message/image",
+    "check_interval": 30,
+    "image_path": "images/"
+}
