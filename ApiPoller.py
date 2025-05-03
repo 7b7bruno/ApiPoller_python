@@ -240,7 +240,7 @@ def raise_flag():
         return
     
     flag_raised = True
-    log_event("Waiting " + config["rise_delay"] + " seconds before rising flag")
+    log_event("Waiting " + str(config["rise_delay"]) + " seconds before rising flag")
     time.sleep(config["rise_delay"])
 
     try:
