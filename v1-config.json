@@ -17,5 +17,6 @@
     "servo_pin": 14,
     "button_pin": 4,
     "flag_down_angle": 10,
-    "flag_up_angle": 180
+    "flag_up_angle": 180,
+    "rise_delay": 65
 }

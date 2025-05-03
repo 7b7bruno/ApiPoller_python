@@ -113,7 +113,8 @@ def load_config():
             "servo_pin": 14,
             "button_pin": 24,
             "flag_down_angle": 180,
-            "flag_up_angle": 0
+            "flag_up_angle": 0,
+            "rise_delay": 65
         }
         with open(CONFIG_FILE, 'w') as f:
             json.dump(default_config, f, indent=4)
@@ -237,7 +238,11 @@ def raise_flag():
     if flag_raised:
         log_error("Flag already raised, skipping...")
         return
+    
     flag_raised = True
+    log_event("Waiting " + config["rise_delay"] + " seconds before rising flag")
+    time.sleep(config["rise_delay"])
+
     try:
         GPIO.setup(config["button_pin"], GPIO.IN, pull_up_down=GPIO.PUD_UP)
         def set_servo_angle(angle):
