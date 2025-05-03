@@ -14,20 +14,10 @@ from gpiozero import AngularServo
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
 LOG_FILE = "app.log"
-SERVO_PIN = 14
-BUTTON_PIN = 4
 
-RED_PIN = 22
-GREEN_PIN = 27
-BLUE_PIN = 17
-
-PAPER_CAPACITY = 18
-INK_CAPACITY = 54
-
-
-servo = AngularServo(SERVO_PIN, min_angle=0, max_angle=180, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
-
+servo = None
 flag_raised = False
+config = None
 
 # Setup logging
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
@@ -44,7 +34,7 @@ def log_error(message):
 def load_status():
     """Load printer status from file, create default if missing."""
     if not os.path.exists(STATUS_FILE):
-        status = {"paper": PAPER_CAPACITY, "ink": INK_CAPACITY}
+        status = {"paper": config["paper_capacity"], "ink": config["ink_capacity"]}
         save_status(status)
     else:
         with open(STATUS_FILE, 'r') as f:
@@ -74,7 +64,7 @@ def check_for_refill():
     try:
         config = load_config()
         headers = {"Authorization": config["printer_token"]}
-        response = requests.get("https://senior-gimenio.eu/api/printer/refill", timeout=10, headers=headers)
+        response = requests.get(config["url"] + config["refill_url"], timeout=10, headers=headers)
         if response.status_code == 200:
             refill_data = response.json()
             refilled = False
@@ -82,12 +72,12 @@ def check_for_refill():
 
             if refill_data.get("paper_refilled", False):
                 log_event("Paper refilled")
-                status["paper"] = PAPER_CAPACITY
+                status["paper"] = config["paper_capacity"]
                 refilled = True
 
             if refill_data.get("ink_refilled", False):
                 log_event("Ink refilled")
-                status["ink"] = INK_CAPACITY
+                status["ink"] = config["ink_capacity"]
                 refilled = True
 
             if refilled:
@@ -101,6 +91,8 @@ def check_for_refill():
     return False
 
 def load_config():
+    global config
+
     if not os.path.exists(CONFIG_FILE):
         default_config = {
             "printer_token": "<TOKEN>",
@@ -108,8 +100,20 @@ def load_config():
             "request_url": "/message/request",
             "ack_url": "/message/ack",
             "image_url": "/message/image",
+            "refill_url": "/printer/refill",
             "check_interval": 1,
-            "image_path": "images/"
+            "image_path": "images/",
+            "paper_capacity": 18,
+            "ink_capacity": 54,
+            "led_pins": {
+                "red": 23,
+                "green": 15,
+                "blue": 18
+            },
+            "servo_pin": 14,
+            "button_pin": 24,
+            "flag_down_angle": 180,
+            "flag_up_angle": 0
         }
         with open(CONFIG_FILE, 'w') as f:
             json.dump(default_config, f, indent=4)
@@ -125,7 +129,7 @@ def load_config():
     
     return config
 
-def check_for_new_messages(config):
+def check_for_new_messages():
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
     # log_event("Checking for new messages...")
 
@@ -235,7 +239,7 @@ def raise_flag():
         return
     flag_raised = True
     try:
-        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(config["button_pin"], GPIO.IN, pull_up_down=GPIO.PUD_UP)
         def set_servo_angle(angle):
             global servo
             servo.angle = angle
@@ -243,14 +247,14 @@ def raise_flag():
             servo.detach()
         
         log_event("Raising flag...")
-        set_servo_angle(180)
+        set_servo_angle(config["flag_up_angle"])
         
         log_event("Waiting for button press...")
-        while GPIO.input(BUTTON_PIN):
+        while GPIO.input(config["button_pin"]):
             time.sleep(0.1)
         
         log_event("Lowering flag...")
-        set_servo_angle(10)
+        set_servo_angle(config["flag_down_angle"])
         flag_raised = False
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
@@ -261,15 +265,16 @@ def generate_file_name(directory, mime):
 
 def init_servo():
     global servo
-    servo.angle = 10
+    servo = AngularServo(config["servo_pin"], min_angle=0, max_angle=180, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
+    servo.angle = config["flag_down_angle"]
     time.sleep(1)
     servo.detach()
 
 # Function to control LED color
 def set_led_color(red, green, blue):
-    GPIO.output(RED_PIN, red)
-    GPIO.output(GREEN_PIN, green)
-    GPIO.output(BLUE_PIN, blue)
+    GPIO.output(config["led_pins"]["red"], red)
+    GPIO.output(config["led_pins"]["green"], green)
+    GPIO.output(config["led_pins"]["blue"], blue)
 
 # Function to update LED status based on flag state
 def update_led_status():
@@ -282,9 +287,9 @@ def update_led_status():
         time.sleep(0.5)
 
 def init_led():
-    GPIO.setup(RED_PIN, GPIO.OUT)
-    GPIO.setup(GREEN_PIN, GPIO.OUT)
-    GPIO.setup(BLUE_PIN, GPIO.OUT)
+    GPIO.setup(config["led_pins"]["red"], GPIO.OUT)
+    GPIO.setup(config["led_pins"]["green"], GPIO.OUT)
+    GPIO.setup(config["led_pins"]["blue"], GPIO.OUT)
 
     led_thread = threading.Thread(target=update_led_status, daemon=True)
     led_thread.start()
@@ -293,15 +298,15 @@ def init_GPIO():
     GPIO.setmode(GPIO.BCM)
 
 if __name__ == "__main__":
+    config = load_config()
     init_GPIO()
     init_led()
     init_servo()
-    config = load_config()
     log_event("Gimenio started")
     while True:
         try:
             check_supply_levels()
-            check_for_new_messages(config)
+            check_for_new_messages()
             time.sleep(config["check_interval"])
         except Exception as e:
             log_error(f"Unhandled error: {e}")
