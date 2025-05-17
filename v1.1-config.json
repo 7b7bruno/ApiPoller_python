@@ -5,6 +5,7 @@
     "ack_url": "/message/ack",
     "image_url": "/message/image",
     "refill_url": "/printer/refill",
+    "flag_state_url": "/special/flag",
     "check_interval": 30,
     "image_path": "images/",
     "paper_capacity": 18,

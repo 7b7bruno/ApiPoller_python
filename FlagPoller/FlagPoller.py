@@ -3,8 +3,8 @@ import os
 import time
 import logging
 import requests
-import RPi.GPIO as GPIO
-from gpiozero import AngularServo
+import RPi.GPIO as GPIO # type: ignore
+from gpiozero import AngularServo # type: ignore
 from datetime import datetime
 import threading
 

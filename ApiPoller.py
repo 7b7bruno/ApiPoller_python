@@ -7,9 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from PIL import Image
 import subprocess
-import RPi.GPIO as GPIO
+import RPi.GPIO as GPIO # type: ignore
 import threading
-from gpiozero import AngularServo
+from gpiozero import AngularServo # type: ignore
 
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
