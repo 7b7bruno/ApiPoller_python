@@ -10,10 +10,15 @@ import subprocess
 import RPi.GPIO as GPIO # type: ignore
 import threading
 from gpiozero import AngularServo # type: ignore
+from huawei_lte_api.Connection import Connection  # type: ignore
+from huawei_lte_api.Client import Client  # type: ignore
+from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
 
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
 LOG_FILE = "app.log"
+
+last_successful_request = time.time()
 
 servo = None
 flag_raised = False
@@ -30,6 +35,38 @@ def log_event(message):
 def log_error(message):
     print(f"ERROR: {message}")
     logging.error(message)
+
+def reboot_modem():
+    try:
+        log_event("Rebooting modem...")
+        with Connection(config["modem_gateway_url"]) as connection:
+            client = Client(connection)
+            if client.device.reboot() == ResponseEnum.OK.value:
+                log_event("Modem reboot requested successfully.")
+            else:
+                log_error("Modem reboot failed.")
+    except Exception as e:
+        log_error(f"Error rebooting modem: {e}")
+
+def send_modem_reboot():
+    log_event("Notifying server of modem restart...")
+    headers = {"Authorization": config["printer_token"]}
+    url = config["url"] + config["modem_restart_url"]
+    
+    timeout_time = time.time() + config["modem_restart_notify_timeout_interval"]  # Try for up to 5 minutes (300 seconds)
+
+    while time.time() < timeout_time:
+        try:
+            response = requests.get(url, headers=headers, timeout=config["request_timeout_interval"])
+            if response.status_code == 200:
+                log_event("Server acknowledged modem reboot.")
+                return True
+            else:
+                log_error(f"Modem reboot notify failed: {response.status_code}")
+        except Exception as e:
+            log_error(f"Error notifying server of modem reboot: {e}")
+        
+        time.sleep(10)  # Wait 10 seconds before retrying
 
 def load_status():
     """Load printer status from file, create default if missing."""
@@ -94,31 +131,7 @@ def load_config():
     global config
 
     if not os.path.exists(CONFIG_FILE):
-        default_config = {
-            "printer_token": "<TOKEN>",
-            "url": "https://senior-gimenio.eu/api",
-            "request_url": "/message/request",
-            "ack_url": "/message/ack",
-            "image_url": "/message/image",
-            "refill_url": "/printer/refill",
-            "check_interval": 1,
-            "image_path": "images/",
-            "paper_capacity": 18,
-            "ink_capacity": 54,
-            "led_pins": {
-                "red": 23,
-                "green": 15,
-                "blue": 18
-            },
-            "servo_pin": 14,
-            "button_pin": 24,
-            "flag_down_angle": 180,
-            "flag_up_angle": 0,
-            "rise_delay": 65
-        }
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(default_config, f, indent=4)
-        log_event(f"Config file created at {CONFIG_FILE}. Please edit and restart.")
+        log_event(f"Rename and edit one of the provided config files to config.json and edit token, then start program again.")
         exit()
     
     with open(CONFIG_FILE, 'r') as f:
@@ -131,6 +144,7 @@ def load_config():
     return config
 
 def check_for_new_messages():
+    global last_successful_request
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
     # log_event("Checking for new messages...")
 
@@ -142,7 +156,7 @@ def check_for_new_messages():
     }
     while True:
         try:
-            response = requests.get(config["url"] + config["request_url"], headers=headers, timeout=10)
+            response = requests.get(config["url"] + config["request_url"], headers=headers, timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
                 log_event("New message found")
                 parse_message(config, response.json())
@@ -151,10 +165,16 @@ def check_for_new_messages():
                 print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
             else:
                 log_error(f"Error: {response.status_code}")
+            last_successful_request = time.time()
             break
         except requests.exceptions.RequestException as e:
-            log_error(f"Connection lost: {e}. Retrying in 5 seconds...")
-            time.sleep(5)
+            log_error(f"Connection lost: {e}. Retrying in {str(config["request_timeout_interval"])} seconds...")
+            if time.time() - last_successful_request > config["modem_restart_trigger_interval"]:
+                reboot_modem()
+                time.sleep(config["modem_boot_time"])
+                last_successful_request = time.time()
+            time.sleep(config["request_timeout_interval"])
+            send_modem_reboot()
 
 def parse_message(config, data):
     message_id = data.get("id")
