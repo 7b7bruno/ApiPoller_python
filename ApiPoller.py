@@ -168,7 +168,8 @@ def check_for_new_messages():
             last_successful_request = time.time()
             break
         except requests.exceptions.RequestException as e:
-            log_error(f"Connection lost: {e}. Retrying in {str(config["request_timeout_interval"])} seconds...")
+            request_timeout_interval = config["request_timeout_interval"]
+            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
             if time.time() - last_successful_request > config["modem_restart_trigger_interval"]:
                 reboot_modem()
                 time.sleep(config["modem_boot_time"])
@@ -186,7 +187,7 @@ def get_image(config, message_id):
     headers = {"Authorization": config["printer_token"]}
     while True:
         try:
-            response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=headers, stream=True, timeout=10)
+            response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=headers, stream=True, timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'image' in response.headers.get('Content-Type', ''):
                 log_event("Image pulled.")
                 save_image(config, response, message_id)
@@ -196,7 +197,8 @@ def get_image(config, message_id):
                 log_error(f"Error: {response.status_code}")
             break
         except requests.exceptions.RequestException as e:
-            log_error(f"Connection lost: {e}. Retrying in 5 seconds...")
+            request_timeout_interval = config["request_timeout_interval"]
+            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
             time.sleep(5)
 
 def save_image(config, response, message_id):
@@ -223,11 +225,12 @@ def ack_message(config, message_id):
     headers = {"Authorization": config["printer_token"]}
     while True:
         try:
-            response = requests.post(f"{config['url']}{config['ack_url']}?message_id={message_id}", headers=headers, timeout=10)
+            response = requests.post(f"{config['url']}{config['ack_url']}?message_id={message_id}", headers=headers, timeout=config["request_timeout_interval"])
             log_event(response.text)
             break
         except requests.exceptions.RequestException as e:
-            log_error(f"Connection lost: {e}. Retrying in 5 seconds...")
+            request_timeout_interval = config["request_timeout_interval"]
+            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
             time.sleep(5)
 
 def print_image(image_path):
