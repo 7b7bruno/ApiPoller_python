@@ -197,7 +197,8 @@ def get_image(config, message_id):
                 log_error(f"Error: {response.status_code}")
             break
         except requests.exceptions.RequestException as e:
-            log_error(f"Connection lost: {e}. Retrying in 5 seconds...")
+            request_timeout_interval = config["request_timeout_interval"]
+            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
             time.sleep(5)
 
 def save_image(config, response, message_id):
@@ -228,7 +229,8 @@ def ack_message(config, message_id):
             log_event(response.text)
             break
         except requests.exceptions.RequestException as e:
-            log_error(f"Connection lost: {e}. Retrying in 5 seconds...")
+            request_timeout_interval = config["request_timeout_interval"]
+            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
             time.sleep(5)
 
 def print_image(image_path):
