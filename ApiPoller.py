@@ -36,6 +36,11 @@ def log_error(message):
     print(f"ERROR: {message}")
     logging.error(message)
 
+def modem_reboot_scheduler():
+    while True:
+        time.sleep(config["modem_restart_trigger_interval"])
+        reboot_modem()
+
 def reboot_modem():
     try:
         log_event("Rebooting modem...")
@@ -43,6 +48,8 @@ def reboot_modem():
             client = Client(connection)
             if client.device.reboot() == ResponseEnum.OK.value:
                 log_event("Modem reboot requested successfully.")
+                time.sleep(30)
+                send_modem_reboot()
             else:
                 log_error("Modem reboot failed.")
     except Exception as e:
@@ -101,7 +108,7 @@ def check_for_refill():
     try:
         config = load_config()
         headers = {"Authorization": config["printer_token"]}
-        response = requests.get(config["url"] + config["refill_url"], timeout=10, headers=headers)
+        response = requests.get(config["url"] + config["refill_url"], timeout=config["request_timeout_interval"], headers=headers)
         if response.status_code == 200:
             refill_data = response.json()
             refilled = False
@@ -169,12 +176,6 @@ def check_for_new_messages():
             break
         except requests.exceptions.RequestException as e:
             log_error(f"Connection lost: {e}. Retrying in {str(config["request_timeout_interval"])} seconds...")
-            if time.time() - last_successful_request > config["modem_restart_trigger_interval"]:
-                reboot_modem()
-                time.sleep(config["modem_boot_time"])
-                last_successful_request = time.time()
-            time.sleep(config["request_timeout_interval"])
-            send_modem_reboot()
 
 def parse_message(config, data):
     message_id = data.get("id")
@@ -186,7 +187,7 @@ def get_image(config, message_id):
     headers = {"Authorization": config["printer_token"]}
     while True:
         try:
-            response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=headers, stream=True, timeout=10)
+            response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=headers, stream=True, timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'image' in response.headers.get('Content-Type', ''):
                 log_event("Image pulled.")
                 save_image(config, response, message_id)
@@ -223,7 +224,7 @@ def ack_message(config, message_id):
     headers = {"Authorization": config["printer_token"]}
     while True:
         try:
-            response = requests.post(f"{config['url']}{config['ack_url']}?message_id={message_id}", headers=headers, timeout=10)
+            response = requests.post(f"{config['url']}{config['ack_url']}?message_id={message_id}", headers=headers, timeout=config["request_timeout_interval"])
             log_event(response.text)
             break
         except requests.exceptions.RequestException as e:
@@ -328,6 +329,8 @@ if __name__ == "__main__":
     init_led()
     init_servo()
     log_event("Gimenio started")
+    threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
+    log_event("Modem restart thread started")
     while True:
         try:
             check_supply_levels()
