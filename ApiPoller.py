@@ -175,7 +175,8 @@ def check_for_new_messages():
             last_successful_request = time.time()
             break
         except requests.exceptions.RequestException as e:
-            log_error(f"Connection lost: {e}. Retrying in {str(config["request_timeout_interval"])} seconds...")
+            request_timeout_interval = config["request_timeout_interval"]
+            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
 
 def parse_message(config, data):
     message_id = data.get("id")
