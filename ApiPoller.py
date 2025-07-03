@@ -24,6 +24,11 @@ servo = None
 flag_raised = False
 config = None
 
+waiting_for_refill = False
+refill_type = None
+_refill_press_count = 0
+_last_refill_press_time = 0.0
+
 # Setup logging
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
@@ -92,15 +97,18 @@ def save_status(status):
 
 def check_supply_levels():
     """Check if ink or paper is empty and stop operation if needed."""
+    global waiting_for_refill, refill_type
     status = load_status()
-    if status["paper"] == 0 or status["ink"] == 0:
-        log_event("Printer out of paper or ink. Stopping operation.")
-        set_led_color(1, 0, 0)  # Turn LED red
-        while not check_for_refill():
-            log_event("Waiting for refill...")
-            time.sleep(10)  # Poll every 10 seconds
-        log_event("Printer refilled. Resuming operation.")
-        set_led_color(0, 1, 0)  # Turn LED green
+    if status["paper"] == 0 and status["ink"] > 0:
+        waiting_for_refill = True
+        refill_type = "paper"
+        set_led_color(1, 1, 0)     # Yellow
+        log_event("Out of paper — waiting for refill")
+    elif status["ink"] == 0:
+        waiting_for_refill = True
+        refill_type = "ink" if status["paper"] > 0 else "both"
+        set_led_color(1, 0, 0)     # Red
+        log_event("Out of ink — waiting for refill")
     return status
 
 def check_for_refill():
@@ -134,6 +142,24 @@ def check_for_refill():
         
     return False
 
+def _perform_refill():
+    global waiting_for_refill, refill_type
+    status = load_status()
+
+    if refill_type in ("paper", "both"):
+        status["paper"] = config["paper_capacity"]
+        log_event("Paper manually refilled.")
+
+    if refill_type in ("ink", "both"):
+        status["ink"] = config["ink_capacity"]
+        log_event("Ink manually refilled.")
+
+    save_status(status)
+
+    waiting_for_refill = False
+    set_led_color(0, 1, 0)         # Green
+    log_event("Resumed normal operation after manual refill.")
+
 def load_config():
     global config
 
@@ -152,6 +178,9 @@ def load_config():
 
 def check_for_new_messages():
     global last_successful_request
+    if waiting_for_refill:
+        log_event("Waiting for refill...")
+        return
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
     # log_event("Checking for new messages...")
 
@@ -292,6 +321,26 @@ def generate_file_name(directory, mime):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return os.path.join(directory, f"{timestamp}.{mime}")
 
+def _door_pressed(channel):
+    global _refill_press_count, _last_refill_press_time
+    if not waiting_for_refill:
+        return
+
+    now = time.time()
+    if now - _last_refill_press_time > 5:
+        _refill_press_count = 0
+
+    _last_refill_press_time = now
+
+    # Count rising edges (door opened)
+    if GPIO.input(channel) == GPIO.HIGH:
+        _refill_press_count += 1
+        log_event(f"Refill door press detected {_refill_press_count}/3")
+
+    if _refill_press_count >= 3:
+        _perform_refill()
+        _refill_press_count = 0
+
 def init_servo():
     global servo
     servo = AngularServo(config["servo_pin"], min_angle=0, max_angle=180, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
@@ -325,6 +374,9 @@ def init_led():
 
 def init_GPIO():
     GPIO.setmode(GPIO.BCM)
+    GPIO.setup(config["button_pin"], GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.add_event_detect(config["button_pin"], GPIO.BOTH,
+                      callback=_door_pressed, bouncetime=200)
 
 if __name__ == "__main__":
     config = load_config()
