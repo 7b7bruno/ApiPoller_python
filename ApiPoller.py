@@ -358,7 +358,12 @@ def set_led_color(red, green, blue):
 def update_led_status():
     global flag_raised
     while True:
-        if flag_raised:
+        if waiting_for_refill:
+            if refill_type == "paper":
+                set_led_color(1, 1, 0)
+            else:
+                set_led_color(1, 0, 0)
+        elif flag_raised:
             set_led_color(0, 0, 1)  # Blue (message received, flag raised)
         else:
             set_led_color(0, 1, 0)  # Green (normal operation)
