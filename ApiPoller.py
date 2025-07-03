@@ -22,6 +22,7 @@ LOG_FILE = "app.log"
 last_successful_request = time.time()
 
 servo = None
+button = None
 flag_raised = False
 config = None
 
@@ -307,14 +308,12 @@ def raise_flag():
         
         log_event("Raising flag...")
         set_servo_angle(config["flag_up_angle"])
-        door_switch = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
 
         log_event("Waiting for button press...")
-        door_switch.wait_for_press()
+        button.wait_for_press()
         
         log_event("Lowering flag...")
         set_servo_angle(config["flag_down_angle"])
-        door_switch.close()
         flag_raised = False
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
@@ -377,9 +376,10 @@ def init_led():
     led_thread.start()
 
 def init_GPIO():
+    global button
     GPIO.setmode(GPIO.BCM)
-    door_switch = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
-    door_switch.when_pressed = _on_door_open
+    button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
+    button.when_pressed = _on_door_open
 
 if __name__ == "__main__":
     config = load_config()
