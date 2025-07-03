@@ -152,6 +152,7 @@ def _perform_refill():
 
     if refill_type in ("ink", "both"):
         status["ink"] = config["ink_capacity"]
+        status["paper"] = config["paper_capacity"]
         log_event("Ink manually refilled.")
 
     save_status(status)
