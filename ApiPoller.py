@@ -13,6 +13,7 @@ from gpiozero import AngularServo # type: ignore
 from huawei_lte_api.Connection import Connection  # type: ignore
 from huawei_lte_api.Client import Client  # type: ignore
 from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
+from gpiozero import Button  # type: ignore
 
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
@@ -298,7 +299,6 @@ def raise_flag():
     time.sleep(config["rise_delay"])
 
     try:
-        GPIO.setup(config["button_pin"], GPIO.IN, pull_up_down=GPIO.PUD_UP)
         def set_servo_angle(angle):
             global servo
             servo.angle = angle
@@ -307,13 +307,14 @@ def raise_flag():
         
         log_event("Raising flag...")
         set_servo_angle(config["flag_up_angle"])
-        
+        door_switch = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
+
         log_event("Waiting for button press...")
-        while GPIO.input(config["button_pin"]):
-            time.sleep(0.1)
+        door_switch.wait_for_press()
         
         log_event("Lowering flag...")
         set_servo_angle(config["flag_down_angle"])
+        door_switch.close()
         flag_raised = False
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
@@ -322,7 +323,7 @@ def generate_file_name(directory, mime):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return os.path.join(directory, f"{timestamp}.{mime}")
 
-def _door_pressed(channel):
+def _on_door_open():
     global _refill_press_count, _last_refill_press_time
     if not waiting_for_refill:
         return
@@ -330,13 +331,10 @@ def _door_pressed(channel):
     now = time.time()
     if now - _last_refill_press_time > 5:
         _refill_press_count = 0
-
     _last_refill_press_time = now
 
-    # Count rising edges (door opened)
-    if GPIO.input(channel) == GPIO.HIGH:
-        _refill_press_count += 1
-        log_event(f"Refill door press detected {_refill_press_count}/3")
+    _refill_press_count += 1
+    log_event(f"Door opened ({_refill_press_count}/3)")
 
     if _refill_press_count >= 3:
         _perform_refill()
@@ -380,9 +378,8 @@ def init_led():
 
 def init_GPIO():
     GPIO.setmode(GPIO.BCM)
-    GPIO.setup(config["button_pin"], GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.add_event_detect(config["button_pin"], GPIO.BOTH,
-                      callback=_door_pressed, bouncetime=200)
+    door_switch = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
+    door_switch.when_pressed = _on_door_open
 
 if __name__ == "__main__":
     config = load_config()
