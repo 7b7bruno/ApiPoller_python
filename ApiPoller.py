@@ -181,9 +181,9 @@ def load_config():
 
 def check_for_new_messages():
     global last_successful_request
-    if waiting_for_refill:
-        log_event("Waiting for refill...")
-        return
+    # if waiting_for_refill:
+    #     log_event("Waiting for refill...")
+    #     return
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
     # log_event("Checking for new messages...")
 
@@ -272,20 +272,20 @@ def print_image(image_path):
         log_error("Image file not found, skipping print...")
         return
     
-    status = check_supply_levels()
-    if status["paper"] == 0 or status["ink"] == 0:
-        log_error("Cannot print, out of supplies.")
-        return
+    # status = check_supply_levels()
+    # if status["paper"] == 0 or status["ink"] == 0:
+    #     log_error("Cannot print, out of supplies.")
+    #     return
 
     try:
         image = Image.open(image_path)
         orientation_option = "-o landscape" if image.width >= image.height else "-o portrait"
         command = ["/snap/bin/cups.lp", "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
         subprocess.run(command)
-        status["paper"] -= 1
-        status["ink"] -= 1
-        save_status(status)
-        log_event(f"Printed successfully. Remaining: {status['paper']} pages, {status['ink']} ink units.")
+        # status["paper"] -= 1
+        # status["ink"] -= 1
+        # save_status(status)
+        log_event(f"Printed successfully.") # log_event(f"Printed successfully. Remaining: {status['paper']} pages, {status['ink']} ink units.")
     except Exception as e:
         log_error(f"Error processing image: {e}")
 
@@ -389,9 +389,10 @@ if __name__ == "__main__":
     log_event("Gimenio started")
     threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
     log_event("Modem restart thread started")
+    log_event("DEMO PRINTER. Paper and ink level tracking disabled.")
     while True:
         try:
-            check_supply_levels()
+            # check_supply_levels()
             check_for_new_messages()
             time.sleep(config["check_interval"])
         except Exception as e:
