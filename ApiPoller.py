@@ -367,6 +367,18 @@ def update_led_status():
             set_led_color(0, 1, 0)  # Green (normal operation)
         time.sleep(0.5)
 
+# Function to control LED color
+def set_paper_led_color(red, green, blue):
+    GPIO.output(config["paper_led_pins"]["red"], red)
+    GPIO.output(config["paper_led_pins"]["green"], green)
+    GPIO.output(config["paper_led_pins"]["blue"], blue)
+
+# Function to update LED status based on flag state
+def update_paper_led_status():
+    while True:
+        set_paper_led_color(1, 0, 0)
+        time.sleep(0.5)
+
 def init_led():
     GPIO.setup(config["led_pins"]["red"], GPIO.OUT)
     GPIO.setup(config["led_pins"]["green"], GPIO.OUT)
@@ -374,6 +386,16 @@ def init_led():
 
     led_thread = threading.Thread(target=update_led_status, daemon=True)
     led_thread.start()
+
+def init_paper_led():
+    GPIO.setup(config["paper_led_pins"]["red"], GPIO.OUT)
+    GPIO.setup(config["paper_led_pins"]["green"], GPIO.OUT)
+    GPIO.setup(config["paper_led_pins"]["blue"], GPIO.OUT)
+
+    paper_led_thread = threading.Thread(target=update_paper_led_status, daemon=True)
+    paper_led_thread.start()
+
+    log_event("This model has an out-of-paper indicator light. It's been switched on.")
 
 def init_GPIO():
     global button
@@ -385,6 +407,7 @@ if __name__ == "__main__":
     config = load_config()
     init_GPIO()
     init_led()
+    init_paper_led()
     init_servo()
     log_event("Gimenio started")
     threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
