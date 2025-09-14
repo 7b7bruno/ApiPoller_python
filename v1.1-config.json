@@ -26,6 +26,7 @@
         "green": 19,
         "blue": 26
     },
+    "paper_led": false,
     "servo_pin": 14,
     "button_pin": 24,
     "flag_down_angle": 180,

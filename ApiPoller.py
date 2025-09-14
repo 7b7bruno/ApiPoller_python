@@ -388,14 +388,17 @@ def init_led():
     led_thread.start()
 
 def init_paper_led():
-    GPIO.setup(config["paper_led_pins"]["red"], GPIO.OUT)
-    GPIO.setup(config["paper_led_pins"]["green"], GPIO.OUT)
-    GPIO.setup(config["paper_led_pins"]["blue"], GPIO.OUT)
+    if config["paper_led"] == True:
+        GPIO.setup(config["paper_led_pins"]["red"], GPIO.OUT)
+        GPIO.setup(config["paper_led_pins"]["green"], GPIO.OUT)
+        GPIO.setup(config["paper_led_pins"]["blue"], GPIO.OUT)
 
-    paper_led_thread = threading.Thread(target=update_paper_led_status, daemon=True)
-    paper_led_thread.start()
+        paper_led_thread = threading.Thread(target=update_paper_led_status, daemon=True)
+        paper_led_thread.start()
 
-    log_event("This model has an out-of-paper indicator light. It's been switched on.")
+        log_event("This model has an out-of-paper indicator light. It's been switched on.")
+    else:
+        log_event("This model does not have a paper indicator light.")
 
 def init_GPIO():
     global button
