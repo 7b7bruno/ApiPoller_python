@@ -404,7 +404,7 @@ def init_GPIO():
     global button
     GPIO.setmode(GPIO.BCM)
     button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
-    button.when_pressed = _on_door_open
+    # button.when_pressed = _on_door_open
 
 if __name__ == "__main__":
     config = load_config()
