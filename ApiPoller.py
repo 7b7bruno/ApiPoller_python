@@ -409,6 +409,7 @@ def init_GPIO():
 
 def init_command_thread():
     command_thread = threading.Thread(target=pollCommands, daemon=True)
+    command_thread.start()
 
 def pollCommands():
     while True:
