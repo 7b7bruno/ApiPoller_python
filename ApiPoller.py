@@ -20,6 +20,7 @@ STATUS_FILE = "printer_status.json"
 LOG_FILE = "app.log"
 
 last_successful_request = time.time()
+last_successful_command_request = time.time()
 
 servo = None
 button = None
@@ -300,12 +301,6 @@ def raise_flag():
     time.sleep(config["rise_delay"])
 
     try:
-        def set_servo_angle(angle):
-            global servo
-            servo.angle = angle
-            time.sleep(1)
-            servo.detach()
-        
         log_event("Raising flag...")
         set_servo_angle(config["flag_up_angle"])
 
@@ -345,6 +340,12 @@ def init_servo():
     servo.angle = config["flag_down_angle"]
     time.sleep(1)
     servo.detach()
+
+def set_servo_angle(angle):
+            global servo
+            servo.angle = angle
+            time.sleep(1)
+            servo.detach()
 
 # Function to control LED color
 def set_led_color(red, green, blue):
@@ -406,6 +407,77 @@ def init_GPIO():
     button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
     # button.when_pressed = _on_door_open
 
+def init_command_thread():
+    command_thread = threading.Thread(target=pollCommands, daemon=True)
+
+def pollCommands():
+    while True:
+        check_for_new_commands()
+        time.sleep(config["command_check_interval"])
+
+def check_for_new_commands():
+    global last_successful_command_request
+    headers = {
+        "Authorization": config["printer_token"],
+    }
+    while True:
+        try:
+            response = requests.get(config["url"] + config["command_url"], headers=headers, timeout=config["request_timeout_interval"])
+            if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
+                log_event("New command found")
+                dispatchCommand(response.json())
+            # elif response.status_code == 201:
+            #     # log_event("No new messages found")
+            #     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
+            else:
+                log_error(f"Command check error: {response.status_code}")
+            last_successful_command_request = time.time()
+            break
+        except requests.exceptions.RequestException as e:
+            request_timeout_interval = config["request_timeout_interval"]
+            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
+       
+def dispatchCommand(data):
+    command_id = data.get("command_id")
+    command = data.get("command")
+    if command and command_id:
+        ackCommand(command_id)
+        match command:
+            case "reboot":
+                reboot()
+            case "shutdown":
+                shutdown()
+            case "flagup":
+                flagUp()
+            case "flagdown":
+                flagDown()
+    else:
+        log_error("Unknown response for command")
+
+def ackCommand(command_id):
+    log_event(f"Acknowledging command. ID: {command_id}")
+    headers = {"Authorization": config["printer_token"]}
+    while True:
+        try:
+            response = requests.post(f"{config['url']}{config['command_ack_url']}?command_id={command_id}", headers=headers, timeout=config["request_timeout_interval"])
+            log_event(response.text)
+            break
+        except requests.exceptions.RequestException as e:
+            request_timeout_interval = config["request_timeout_interval"]
+            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
+            time.sleep(5)
+
+def reboot():
+    command = ["sudo", "reboot"]
+    subprocess.run(command)
+def shutdown():
+    command = ["sudo", "poweroff"]
+    subprocess.run(command)
+def flagUp():
+    set_servo_angle(config["flag_up_angle"])
+def flagDown():
+    set_servo_angle(config["flag_down_angle"])
+
 if __name__ == "__main__":
     config = load_config()
     init_GPIO()
@@ -414,7 +486,9 @@ if __name__ == "__main__":
     init_servo()
     log_event("Gimenio started")
     threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
+    init_command_thread()
     log_event("Modem restart thread started")
+    log_event("Command thread started")
     log_event("DEMO PRINTER. Paper and ink level tracking disabled.")
     while True:
         try:
