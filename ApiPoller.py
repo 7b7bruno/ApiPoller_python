@@ -427,8 +427,8 @@ def check_for_new_commands():
             if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
                 log_event("New command found")
                 dispatchCommand(response.json())
-            # elif response.status_code == 201:
-            #     # log_event("No new messages found")
+            elif response.status_code == 201:
+                log_event("No new commands found")
             #     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
             else:
                 log_error(f"Command check error: {response.status_code}")
