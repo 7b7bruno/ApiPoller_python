@@ -194,7 +194,7 @@ def update_config():
             if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
                 log_event("Config retrieved")
                 with open(CONFIG_FILE, "w") as f:
-                    json.dump(response.json, f, indent=4)
+                    json.dump(response.json(), f, indent=4)
                 load_config_file()
                 log_event("Config updated")
                 
