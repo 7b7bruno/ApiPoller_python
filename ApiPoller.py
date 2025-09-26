@@ -164,21 +164,52 @@ def _perform_refill():
     set_led_color(0, 1, 0)         # Green
     log_event("Resumed normal operation after manual refill.")
 
-def load_config():
+def init_config():
     global config
 
     if not os.path.exists(CONFIG_FILE):
         log_event(f"Rename and edit one of the provided config files to config.json and edit token, then start program again.")
         exit()
     
-    with open(CONFIG_FILE, 'r') as f:
-        config = json.load(f)
-    
+    load_config_file()
+
     if config["printer_token"] == "<TOKEN>":
         log_error("Please enter a valid printer token in the config file and restart.")
         exit()
-    
-    return config
+
+    update_config()
+
+def load_config_file():
+    global config
+    with open(CONFIG_FILE, 'r') as f:
+        config = json.load(f)
+
+def update_config():
+    headers = {
+        "Authorization": config["printer_token"],
+    }
+    retries = 5
+    while retries > 0:
+        try:
+            response = requests.get(config["url"] + config["config_url"], headers=headers, timeout=config["request_timeout_interval"])
+            if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
+                log_event("Config retrieved")
+                with open(CONFIG_FILE, "w") as f:
+                    json.dump(response.json, f, indent=4)
+                load_config_file()
+                log_event("Config updated")
+                
+            elif response.status_code == 201:
+                # log_event("No new messages found")
+                print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
+            else:
+                log_error(f"Error: {response.status_code}")
+                retries -= 1
+            break
+        except requests.exceptions.RequestException as e:
+            request_timeout_interval = config["request_timeout_interval"]
+            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
+            retries -= 1
 
 def check_for_new_messages():
     global last_successful_request
@@ -452,6 +483,8 @@ def dispatchCommand(data):
                 flagUp()
             case "flagdown":
                 flagDown()
+            case "loadconfig":
+                update_config()
     else:
         log_error("Unknown response for command")
 
@@ -480,7 +513,7 @@ def flagDown():
     set_servo_angle(config["flag_down_angle"])
 
 if __name__ == "__main__":
-    config = load_config()
+    init_config()
     init_GPIO()
     init_led()
     init_paper_led()

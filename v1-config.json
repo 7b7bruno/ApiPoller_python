@@ -5,6 +5,7 @@
     "ack_url": "/message/ack",
     "command_url": "/command",
     "command_ack_url": "/command/ack",
+    "config_url": "/config",
     "image_url": "/message/image",
     "refill_url": "/printer/refill",
     "flag_state_url": "/special/flag",
