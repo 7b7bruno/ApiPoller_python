@@ -217,7 +217,7 @@ def check_config(data):
     if not isinstance(data, dict):
         return False
 
-    token = data.get("token")
+    token = data.get("printer_token")
     if not isinstance(token, str):
         return False
 
