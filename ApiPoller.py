@@ -117,7 +117,6 @@ def check_supply_levels():
 def check_for_refill():
     """Poll API endpoint to check if printer has been refilled."""
     try:
-        config = load_config()
         headers = {"Authorization": config["printer_token"]}
         response = requests.get(config["url"] + config["refill_url"], timeout=config["request_timeout_interval"], headers=headers)
         if response.status_code == 200:
