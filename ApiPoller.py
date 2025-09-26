@@ -193,11 +193,14 @@ def update_config():
             response = requests.get(config["url"] + config["config_url"], headers=headers, timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
                 log_event("Config retrieved")
-                with open(CONFIG_FILE, "w") as f:
-                    json.dump(response.json(), f, indent=4)
-                load_config_file()
-                log_event("Config updated")
-                
+                data = response.json()
+                if(check_config(data)):
+                    with open(CONFIG_FILE, "w") as f:
+                        json.dump(data, f, indent=4)
+                    load_config_file()
+                    log_event("Config updated")
+                else:
+                    log_error("Pulled config doesn't pass integrity check, not using It.")
             elif response.status_code == 201:
                 # log_event("No new messages found")
                 print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
@@ -209,6 +212,19 @@ def update_config():
             request_timeout_interval = config["request_timeout_interval"]
             log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
             retries -= 1
+
+def check_config(data):
+    if not isinstance(data, dict):
+        return False
+
+    token = data.get("token")
+    if not isinstance(token, str):
+        return False
+
+    if len(token) != 32:
+        return False
+
+    return token.isalnum()
 
 def check_for_new_messages():
     global last_successful_request
