@@ -7,13 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from PIL import Image
 import subprocess
-import RPi.GPIO as GPIO # type: ignore
 import threading
-from gpiozero import AngularServo # type: ignore
+from gpiozero import AngularServo, Button, OutputDevice # type: ignore
 from huawei_lte_api.Connection import Connection  # type: ignore
 from huawei_lte_api.Client import Client  # type: ignore
 from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
-from gpiozero import Button  # type: ignore
 
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
@@ -26,6 +24,14 @@ servo = None
 button = None
 flag_raised = False
 config = None
+
+# LED OutputDevice objects
+led_red = None
+led_green = None
+led_blue = None
+paper_led_red = None
+paper_led_green = None
+paper_led_blue = None
 
 waiting_for_refill = False
 refill_type = None
@@ -352,12 +358,13 @@ def raise_flag():
 
         log_event("Waiting for button press...")
         button.wait_for_press()
-        
+
         log_event("Lowering flag...")
         set_servo_angle(config["flag_down_angle"])
         flag_raised = False
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
+        flag_raised = False
 
 def generate_file_name(directory, mime):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -395,9 +402,18 @@ def set_servo_angle(angle):
 
 # Function to control LED color
 def set_led_color(red, green, blue):
-    GPIO.output(config["led_pins"]["red"], red)
-    GPIO.output(config["led_pins"]["green"], green)
-    GPIO.output(config["led_pins"]["blue"], blue)
+    if red:
+        led_red.on()
+    else:
+        led_red.off()
+    if green:
+        led_green.on()
+    else:
+        led_green.off()
+    if blue:
+        led_blue.on()
+    else:
+        led_blue.off()
 
 # Function to update LED status based on flag state
 def update_led_status():
@@ -416,9 +432,18 @@ def update_led_status():
 
 # Function to control LED color
 def set_paper_led_color(red, green, blue):
-    GPIO.output(config["paper_led_pins"]["red"], red)
-    GPIO.output(config["paper_led_pins"]["green"], green)
-    GPIO.output(config["paper_led_pins"]["blue"], blue)
+    if red:
+        paper_led_red.on()
+    else:
+        paper_led_red.off()
+    if green:
+        paper_led_green.on()
+    else:
+        paper_led_green.off()
+    if blue:
+        paper_led_blue.on()
+    else:
+        paper_led_blue.off()
 
 # Function to update LED status based on flag state
 def update_paper_led_status():
@@ -427,18 +452,20 @@ def update_paper_led_status():
         time.sleep(0.5)
 
 def init_led():
-    GPIO.setup(config["led_pins"]["red"], GPIO.OUT)
-    GPIO.setup(config["led_pins"]["green"], GPIO.OUT)
-    GPIO.setup(config["led_pins"]["blue"], GPIO.OUT)
+    global led_red, led_green, led_blue
+    led_red = OutputDevice(config["led_pins"]["red"])
+    led_green = OutputDevice(config["led_pins"]["green"])
+    led_blue = OutputDevice(config["led_pins"]["blue"])
 
     led_thread = threading.Thread(target=update_led_status, daemon=True)
     led_thread.start()
 
 def init_paper_led():
+    global paper_led_red, paper_led_green, paper_led_blue
     if config["paper_led"] == True:
-        GPIO.setup(config["paper_led_pins"]["red"], GPIO.OUT)
-        GPIO.setup(config["paper_led_pins"]["green"], GPIO.OUT)
-        GPIO.setup(config["paper_led_pins"]["blue"], GPIO.OUT)
+        paper_led_red = OutputDevice(config["paper_led_pins"]["red"])
+        paper_led_green = OutputDevice(config["paper_led_pins"]["green"])
+        paper_led_blue = OutputDevice(config["paper_led_pins"]["blue"])
 
         paper_led_thread = threading.Thread(target=update_paper_led_status, daemon=True)
         paper_led_thread.start()
@@ -449,7 +476,6 @@ def init_paper_led():
 
 def init_GPIO():
     global button
-    GPIO.setmode(GPIO.BCM)
     button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
     # button.when_pressed = _on_door_open
 
