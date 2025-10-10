@@ -554,6 +554,7 @@ def flagDown():
     set_servo_angle(config["flag_down_angle"])
 
 if __name__ == "__main__":
+    log_event("Experimental")
     init_config()
     init_GPIO()
     init_led()
