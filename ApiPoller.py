@@ -333,7 +333,7 @@ def print_image(image_path):
     try:
         image = Image.open(image_path)
         orientation_option = "-o landscape" if image.width >= image.height else "-o portrait"
-        command = ["/snap/bin/cups.lp", "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
+        command = [config["print_command"], "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
         subprocess.run(command)
         # status["paper"] -= 1
         # status["ink"] -= 1
@@ -554,7 +554,6 @@ def flagDown():
     set_servo_angle(config["flag_down_angle"])
 
 if __name__ == "__main__":
-    log_event("Experimental")
     init_config()
     init_GPIO()
     init_led()

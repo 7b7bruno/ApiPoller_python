@@ -11,6 +11,7 @@
     "flag_state_url": "/special/flag",
     "modem_restart_url": "/printer/modem-restart",
     "modem_gateway_url": "http://192.168.8.1",
+    "print_command": "/snap/bin/cups.lp",
     "check_interval": 30,
     "command_check_interval": 10,
     "request_timeout_interval": 30,
