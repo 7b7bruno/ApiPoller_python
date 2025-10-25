@@ -567,9 +567,21 @@ def flagDown():
 
 def init_CUPS():
     global cupsConn
-    log_event("Waiting 20s before init CUPS")
-    time.sleep(20)
-    cupsConn = cups.Connection()
+    log_event(f"Waiting {config["initial_delay"]}s before connecting to cups")
+    time.sleep(config["initial_delay"])
+    for attempt in range(config["cups_retries"]):
+        try:
+            cupsConn = cups.Connection()
+            conn.getPrinters()
+            print("CUPS connected")
+            return True
+        except RuntimeError as e:
+            if attempt < config["cups_retries"] - 1:
+                print(f"Waiting for CUPS... ({attempt + 1}/{config['cups_retries']})")
+                time.sleep(1)
+            else:
+                raise Exception(f"CUPS not available after {config["cups_retries"]}")
+    return None
 
 if __name__ == "__main__":
     init_config()
