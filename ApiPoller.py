@@ -350,7 +350,7 @@ def print_image(image_path):
     try:
         job_id = conn.printFile(printer_name, photo_path, 
                                f'Photo Print', options)
-        print(f"✓ Job {job_id} submitted: {photo_path}"        
+        print(f"✓ Job {job_id} submitted: {photo_path}")      
     except Exception as e:
         log_error(f"Error processing image: {e}")
 
