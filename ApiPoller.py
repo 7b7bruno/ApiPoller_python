@@ -348,7 +348,7 @@ def print_image(image_path):
     print(f"Image size: {width}x{height} ({'landscape' if is_landscape else 'portrait'})")
 
     try:
-        job_id = conn.printFile(printer_name, photo_path, 
+        job_id = cupsConn.printFile(printer_name, photo_path, 
                                f'Photo Print', options)
         print(f"✓ Job {job_id} submitted: {photo_path}")      
     except Exception as e:
@@ -579,8 +579,8 @@ if __name__ == "__main__":
     log_event("Gimenio started")
     if config["reboot_modem"] is True:
         threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
+        log_event("Modem restart thread started")
     init_command_thread()
-    log_event("Modem restart thread started")
     log_event("Command thread started")
     log_event("DEMO PRINTER. Paper and ink level tracking disabled.")
     while True:
