@@ -572,7 +572,7 @@ def init_CUPS():
     for attempt in range(config["cups_retries"]):
         try:
             cupsConn = cups.Connection()
-            conn.getPrinters()
+            cupsConn.getPrinters()
             print("CUPS connected")
             return True
         except RuntimeError as e:
