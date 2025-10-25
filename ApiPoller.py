@@ -12,6 +12,7 @@ from gpiozero import AngularServo, Button, OutputDevice # type: ignore
 from huawei_lte_api.Connection import Connection  # type: ignore
 from huawei_lte_api.Client import Client  # type: ignore
 from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
+import cups
 
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
@@ -37,6 +38,9 @@ waiting_for_refill = False
 refill_type = None
 _refill_press_count = 0
 _last_refill_press_time = 0.0
+
+# CUPS connection
+cupsConn = None
 
 # Setup logging
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
@@ -330,15 +334,23 @@ def print_image(image_path):
     #     log_error("Cannot print, out of supplies.")
     #     return
 
+    printer_name = config["printer_name"]
+    # Detect orientation
+    img = Image.open(image_path)
+    width, height = img.size
+    is_landscape = width > height
+    options = {
+        'media': 'custom_max_102x153mm',
+        'print-scaling': 'fill',
+        'orientation-requested': '4' if is_landscape else '3'  # 3=portrait, 4=landscape
+    }
+    
+    print(f"Image size: {width}x{height} ({'landscape' if is_landscape else 'portrait'})")
+
     try:
-        image = Image.open(image_path)
-        orientation_option = "-o landscape" if image.width >= image.height else "-o portrait"
-        command = [config["print_command"], "-o", "media=Postcard.Borderless", "-o", "fill", orientation_option, image_path]
-        subprocess.run(command)
-        # status["paper"] -= 1
-        # status["ink"] -= 1
-        # save_status(status)
-        log_event(f"Printed successfully.") # log_event(f"Printed successfully. Remaining: {status['paper']} pages, {status['ink']} ink units.")
+        job_id = conn.printFile(printer_name, photo_path, 
+                               f'Photo Print', options)
+        print(f"✓ Job {job_id} submitted: {photo_path}"        
     except Exception as e:
         log_error(f"Error processing image: {e}")
 
@@ -553,14 +565,20 @@ def flagUp():
 def flagDown():
     set_servo_angle(config["flag_down_angle"])
 
+def init_CUPS():
+    global cupsConn
+    cupsConn = cups.Connection()
+
 if __name__ == "__main__":
     init_config()
     init_GPIO()
     init_led()
     init_paper_led()
     init_servo()
+    init_CUPS()
     log_event("Gimenio started")
-    threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
+    if config["reboot_modem"] is True:
+        threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
     init_command_thread()
     log_event("Modem restart thread started")
     log_event("Command thread started")
