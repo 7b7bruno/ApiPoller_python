@@ -567,7 +567,8 @@ def flagDown():
 
 def init_CUPS():
     global cupsConn
-    time.sleep(10)
+    log_event("Waiting 20s before init CUPS")
+    time.sleep(20)
     cupsConn = cups.Connection()
 
 if __name__ == "__main__":
