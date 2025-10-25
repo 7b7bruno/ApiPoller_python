@@ -348,9 +348,9 @@ def print_image(image_path):
     print(f"Image size: {width}x{height} ({'landscape' if is_landscape else 'portrait'})")
 
     try:
-        job_id = cupsConn.printFile(printer_name, photo_path, 
+        job_id = cupsConn.printFile(printer_name, image_path, 
                                f'Photo Print', options)
-        print(f"✓ Job {job_id} submitted: {photo_path}")      
+        print(f"✓ Job {job_id} submitted: {image_path}")      
     except Exception as e:
         log_error(f"Error processing image: {e}")
 
