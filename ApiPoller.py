@@ -197,7 +197,7 @@ def update_config():
     headers = {
         "Authorization": config["printer_token"],
     }
-    retries = 5
+    retries = 30
     while retries > 0:
         try:
             response = requests.get(config["url"] + config["config_url"], headers=headers, timeout=config["request_timeout_interval"])
@@ -221,6 +221,7 @@ def update_config():
         except requests.exceptions.RequestException as e:
             request_timeout_interval = config["request_timeout_interval"]
             log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
+            time.sleep(1)
             retries -= 1
 
 def check_config(data):
