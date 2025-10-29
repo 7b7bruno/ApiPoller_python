@@ -20,6 +20,7 @@ def track_job_status(conn, job_id, printer_name):
     }
 
     last_state = None
+    last_error = None
     timeout = 300  # 5 minutes timeout
     start_time = time.time()
     job_found = False
@@ -35,7 +36,6 @@ def track_job_status(conn, job_id, printer_name):
             jobs = conn.getJobs(which_jobs='all', my_jobs=False, first_job_id=job_id, limit=1)
 
             if job_id in jobs:
-                print("Job in queue")
                 job_found = True
                 current_state = conn.getJobAttributes(job_id)["job-state"]
                 state_name = job_states.get(current_state, f'unknown({current_state})')
@@ -49,7 +49,23 @@ def track_job_status(conn, job_id, printer_name):
                     last_state = current_state
 
                 # Check for completion or error states
-                if current_state == 9:  # completed
+                if current_state == 5:
+                    reasons = conn.getJobAttributes(job_id)["job-printer-state-reasons"]
+                    if len(reasons) > 1:
+                        current_error = None
+                        if "marker-supply-empty-error" in reasons and "input-tray-missing":
+                            current_error = "No paper casette/ink cartridge or both"
+                        elif "media-empty-error" in reasons:
+                            current_error = "Out of paper"
+                        elif "marker-supply-empty-error" in reasons:
+                            current_error = "Out of ink or ink cartridge missing"
+                        elif "input-tray-missing" in reasons:
+                            current_error = "Paper casette missing or incorrectly inserted"
+                        if current_error is not None and last_error != current_error:
+                            print(current_error)
+                            last_error = current_error
+
+                elif current_state == 9:  # completed
                     print(f"✓ Job {job_id} completed successfully!")
                     break
                 elif current_state in [7, 8]:  # canceled or aborted
