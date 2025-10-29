@@ -40,7 +40,7 @@ def track_job_status(conn, job_id, printer_name):
                 current_state = conn.getJobAttributes(job_id)["job-state"]
                 state_name = job_states.get(current_state, f'unknown({current_state})')
 
-                if state is None:
+                if current_state is None:
                     print(f"Job {job_id} status is none. exiting...")
                     break
                 # Print status change
