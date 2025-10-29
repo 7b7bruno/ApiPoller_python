@@ -40,9 +40,13 @@ def track_job_status(conn, job_id, printer_name):
                 current_state = conn.getJobAttributes(job_id)["job-state"]
                 state_name = job_states.get(current_state, f'unknown({current_state})')
 
+                if state is None:
+                    print(f"Job {job_id} status is none. exiting...")
+                    break
                 # Print status change
-                print(f"Job {job_id} status: {state_name}")
-                last_state = current_state
+                if current_state != last_state:
+                    print(f"Job {job_id} status: {state_name}")
+                    last_state = current_state
 
                 # Check for completion or error states
                 if current_state == 9:  # completed
@@ -51,22 +55,20 @@ def track_job_status(conn, job_id, printer_name):
                 elif current_state in [7, 8]:  # canceled or aborted
                     print(f"✗ Job {job_id} {state_name}")
                     break
-                else:
-                    print(f"Unknown job state: {current_state}")
             else:
                 # Job not in queue
                 if job_found:
                     # Job was found before but now gone - it completed
-                    print(f"✓ Job {job_id} completed successfully!")
+                    print(f"✓ Job {job_id} no longer in queue. Assuming It completed successfully.")
                     break
                 else:
                     # Job never found - might have completed immediately
                     # Try a few more times before giving up
                     if time.time() - start_time > 5:
-                        print(f"✓ Job {job_id} completed (not found in queue)")
+                        print(f"✓ Job never found. Assuming It completed immediately.")
                         break
 
-            time.sleep(5)
+            time.sleep(2)
 
         except Exception as e:
             print(f"Error tracking job: {e}")
