@@ -47,7 +47,7 @@ def track_job_status(conn, job_id, printer_name):
                 print(f"✗ Job {job_id} {state_name}")
                 break
 
-            time.sleep(1)  # Poll every second
+            time.sleep(10)  # Poll every second
 
         except Exception as e:
             print(f"Error tracking job: {e}")
