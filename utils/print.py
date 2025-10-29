@@ -37,8 +37,7 @@ def track_job_status(conn, job_id, printer_name):
             if job_id in jobs:
                 print("Job in queue")
                 job_found = True
-                job_info = jobs[job_id]
-                current_state = job_info.get('job-state')
+                current_state = conn.getJobAttributes(job_id)["job-state"]
                 state_name = job_states.get(current_state, f'unknown({current_state})')
 
                 # Print status change
