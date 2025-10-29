@@ -50,10 +50,10 @@ def track_job_status(conn, job_id, printer_name):
 
                 # Check for completion or error states
                 if current_state == 5:
-                    reasons = conn.getJobAttributes(job_id).get(["job-printer-state-reasons"], [])
+                    reasons = conn.getJobAttributes(job_id).get("job-printer-state-reasons", [])
                     if len(reasons) > 1:
                         current_error = None
-                        if "marker-supply-empty-error" in reasons and "input-tray-missing":
+                        if "marker-supply-empty-error" in reasons and "input-tray-missing" in reasons:
                             current_error = "No paper casette/ink cartridge or both"
                         elif "media-empty-error" in reasons:
                             current_error = "Out of paper"
