@@ -20,37 +20,57 @@ def track_job_status(conn, job_id, printer_name):
     }
 
     last_state = None
+    timeout = 300  # 5 minutes timeout
+    start_time = time.time()
+    job_found = False
 
     while True:
         try:
-            jobs = conn.getJobs(which_jobs='all', my_jobs=False)
-
-            if job_id not in jobs:
-                # Job no longer in queue - likely completed or removed
-                print(f"✓ Job {job_id} completed successfully!")
+            # Check timeout
+            if time.time() - start_time > timeout:
+                print(f"⚠ Timeout waiting for job {job_id}")
                 break
 
-            job_info = jobs[job_id]
-            current_state = job_info.get('job-state')
-            state_name = job_states.get(current_state, f'unknown({current_state})')
+            # Get all jobs including completed ones
+            jobs = conn.getJobs(which_jobs='all', my_jobs=False, first_job_id=job_id, limit=1)
 
-            # Print status change
-            if current_state != last_state:
-                print(f"Job {job_id} status: {state_name}")
-                last_state = current_state
+            if job_id in jobs:
+                job_found = True
+                job_info = jobs[job_id]
+                current_state = job_info.get('job-state')
+                state_name = job_states.get(current_state, f'unknown({current_state})')
 
-            # Check for completion or error states
-            if current_state == 9:  # completed
-                print(f"✓ Job {job_id} completed successfully!")
-                break
-            elif current_state in [7, 8]:  # canceled or aborted
-                print(f"✗ Job {job_id} {state_name}")
-                break
+                # Print status change
+                if current_state != last_state:
+                    print(f"Job {job_id} status: {state_name}")
+                    last_state = current_state
 
-            time.sleep(10)  # Poll every second
+                # Check for completion or error states
+                if current_state == 9:  # completed
+                    print(f"✓ Job {job_id} completed successfully!")
+                    break
+                elif current_state in [7, 8]:  # canceled or aborted
+                    print(f"✗ Job {job_id} {state_name}")
+                    break
+            else:
+                # Job not in queue
+                if job_found:
+                    # Job was found before but now gone - it completed
+                    print(f"✓ Job {job_id} completed successfully!")
+                    break
+                else:
+                    # Job never found - might have completed immediately
+                    # Try a few more times before giving up
+                    if time.time() - start_time > 5:
+                        print(f"✓ Job {job_id} completed (not found in queue)")
+                        break
+
+            time.sleep(1)
 
         except Exception as e:
             print(f"Error tracking job: {e}")
+            import traceback
+            traceback.print_exc()
             break
 
 def print_photo(photo_path, track_status=True):
