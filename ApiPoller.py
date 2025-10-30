@@ -13,10 +13,91 @@ from huawei_lte_api.Connection import Connection  # type: ignore
 from huawei_lte_api.Client import Client  # type: ignore
 from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
 import cups
+import traceback
 
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
 LOG_FILE = "app.log"
+
+# Default configuration values
+DEFAULT_CONFIG = {
+    "printer_token": "<TOKEN>",
+    "url": "https://senior-gimenio.eu/api",
+    "request_url": "/message/request",
+    "ack_url": "/message/ack",
+    "command_url": "/command",
+    "command_ack_url": "/command/ack",
+    "config_url": "/config",
+    "image_url": "/message/image",
+    "refill_url": "/printer/refill",
+    "flag_state_url": "/special/flag",
+    "modem_restart_url": "/printer/modem-restart",
+    "modem_gateway_url": "http://192.168.8.1",
+    "print_command": "/snap/bin/cups.lp",
+    "printer_name": "Canon_SELPHY_CP1500",
+    "initial_delay": 10,
+    "cups_retries": 30,
+    "check_interval": 30,
+    "command_check_interval": 10,
+    "request_timeout_interval": 30,
+    "reboot_modem": False,
+    "modem_restart_trigger_interval": 3600,
+    "modem_restart_notify_timeout_interval": 300,
+    "modem_boot_time": 60,
+    "image_path": "images/",
+    "paper_capacity": 18,
+    "ink_capacity": 54,
+    "led_pins": {
+        "red": 23,
+        "green": 15,
+        "blue": 18
+    },
+    "paper_led_pins": {
+        "red": 13,
+        "green": 19,
+        "blue": 26
+    },
+    "paper_led": False,
+    "servo_pin": 14,
+    "button_pin": 24,
+    "flag_down_angle": 180,
+    "flag_up_angle": 0,
+    "rise_delay": 48,
+    "print_tracking_interval": 2
+}
+
+class ConfigManager:
+    """Manages configuration with default value fallback."""
+
+    def __init__(self, defaults):
+        self.defaults = defaults
+        self.config = {}
+
+    def update_from_dict(self, config_dict):
+        """Update config from a dictionary, merging with defaults."""
+        # Start with defaults
+        merged = self.defaults.copy()
+
+        # Deep merge for nested dictionaries
+        for key, value in config_dict.items():
+            if isinstance(value, dict) and key in merged and isinstance(merged[key], dict):
+                merged[key] = {**merged[key], **value}
+            else:
+                merged[key] = value
+
+        self.config = merged
+
+    def __getitem__(self, key):
+        """Dict-like access: config["key"]"""
+        return self.config.get(key, self.defaults.get(key))
+
+    def get(self, key, default=None):
+        """Safe access with optional default."""
+        return self.config.get(key, self.defaults.get(key, default))
+
+    def __contains__(self, key):
+        """Support 'in' operator."""
+        return key in self.config or key in self.defaults
 
 last_successful_request = time.time()
 last_successful_command_request = time.time()
@@ -24,7 +105,7 @@ last_successful_command_request = time.time()
 servo = None
 button = None
 flag_raised = False
-config = None
+config = ConfigManager(DEFAULT_CONFIG)
 
 # LED OutputDevice objects
 led_red = None
@@ -36,8 +117,6 @@ paper_led_blue = None
 
 waiting_for_refill = False
 refill_type = None
-_refill_press_count = 0
-_last_refill_press_time = 0.0
 
 # CUPS connection
 cupsConn = None
@@ -191,7 +270,8 @@ def init_config():
 def load_config_file():
     global config
     with open(CONFIG_FILE, 'r') as f:
-        config = json.load(f)
+        config_dict = json.load(f)
+    config.update_from_dict(config_dict)
 
 def update_config():
     headers = {
@@ -207,7 +287,8 @@ def update_config():
                 if(check_config(data)):
                     with open(CONFIG_FILE, "w") as f:
                         json.dump(data, f, indent=4)
-                    load_config_file()
+                    # Server config overrides all, then defaults fill in any missing fields
+                    config.update_from_dict(data)
                     log_event("Config updated")
                 else:
                     log_error("Pulled config doesn't pass integrity check, not using It.")
@@ -239,24 +320,17 @@ def check_config(data):
 
 def check_for_new_messages():
     global last_successful_request
-    # if waiting_for_refill:
-    #     log_event("Waiting for refill...")
-    #     return
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
-    # log_event("Checking for new messages...")
 
-    status = load_status()
     headers = {
         "Authorization": config["printer_token"],
-        "X-Paper-Remaining": str(status["paper"]),
-        "X-Ink-Remaining": str(status["ink"])
     }
     while True:
         try:
             response = requests.get(config["url"] + config["request_url"], headers=headers, timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
                 log_event("New message found")
-                parse_message(config, response.json())
+                handle_message(config, response.json())
             elif response.status_code == 201:
                 # log_event("No new messages found")
                 print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
@@ -268,10 +342,30 @@ def check_for_new_messages():
             request_timeout_interval = config["request_timeout_interval"]
             log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
 
-def parse_message(config, data):
-    message_id = data.get("id")
-    if message_id:
-        get_image(config, message_id)
+def handle_message(config, data):
+    message_id = data.get("id", None)
+    
+    if message_id is None:
+        log_error("Retrieved message contains invalid message id. Skipping.")
+        return
+    
+    image_path = get_image(config, message_id)
+    if image_path is None:
+        log_error("Failed to pull image.")
+        return
+
+    job_id = print_image(image_path)
+    if job_id is None:
+        log_error("Failed to print.")
+        return
+
+    print_completed = track_print(job_id)
+    if print_completed:
+        flag_thread = threading.Thread(target=raise_flag, daemon=True)
+        ack_message(message_id)
+    else:
+        log_error("Print tracking failed. Not raising flag. Ack'ing message")
+        ack_message(message_id)
 
 def get_image(config, message_id):
     log_event("Getting image...")
@@ -281,11 +375,14 @@ def get_image(config, message_id):
             response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=headers, stream=True, timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'image' in response.headers.get('Content-Type', ''):
                 log_event("Image pulled.")
-                save_image(config, response, message_id)
+                image_path = save_image(config, response, message_id)
+                return image_path
             elif response.status_code == 201:
                 log_event("No new messages found")
+                return None
             else:
                 log_error(f"Error: {response.status_code}")
+                return None
             break
         except requests.exceptions.RequestException as e:
             request_timeout_interval = config["request_timeout_interval"]
@@ -304,14 +401,16 @@ def save_image(config, response, message_id):
                 f.write(chunk)
         
         log_event(f"Image saved to {image_path}")
-        ack_message(config, message_id)
-        print_image(image_path)
-        if not flag_raised:
-            threading.Thread(target=raise_flag, daemon=True).start()
+        return image_path
+        # ack_message(config, message_id)
+        # print_image(image_path)
+        # if not flag_raised:
+        #     threading.Thread(target=raise_flag, daemon=True).start()
     except Exception as e:
         log_error(f"Error saving image: {e}")
+        return None
 
-def ack_message(config, message_id):
+def ack_message(message_id):
     log_event(f"Acknowledging message ID: {message_id}")
     headers = {"Authorization": config["printer_token"]}
     while True:
@@ -329,11 +428,6 @@ def print_image(image_path):
     if not os.path.exists(image_path):
         log_error("Image file not found, skipping print...")
         return
-    
-    # status = check_supply_levels()
-    # if status["paper"] == 0 or status["ink"] == 0:
-    #     log_error("Cannot print, out of supplies.")
-    #     return
 
     printer_name = config["printer_name"]
     # Detect orientation
@@ -351,23 +445,100 @@ def print_image(image_path):
     try:
         job_id = cupsConn.printFile(printer_name, image_path, 
                                f'Photo Print', options)
-        print(f"✓ Job {job_id} submitted: {image_path}")      
+        print(f"✓ Job {job_id} submitted: {image_path}")   
+        return job_id   
     except Exception as e:
         log_error(f"Error processing image: {e}")
+        return None
+
+def track_print(job_id):
+    log_event(f"Tracking job {job_id}...")
+    # IPP job states
+    job_states = {
+        3: 'pending',
+        4: 'pending-held',
+        5: 'processing',
+        6: 'processing-stopped',
+        7: 'canceled',
+        8: 'aborted',
+        9: 'completed'
+    }
+    last_state = None
+    last_error = None
+    start_time = time.time()
+    job_found = False
+    while True:
+        try:
+            jobs = cupsConn.getJobs(which_jobs='all', my_jobs=False, first_job_id=job_id, limit=1)
+            if job_id in jobs:
+                job_found = True
+                current_state = cupsConn.getJobAttributes(job_id)["job-state"]
+                state_name = job_states.get(current_state, f'unknown({current_state})')
+
+                if current_state is None:
+                    log_error(f"Job {job_id} status is none. Stopping tracking.")
+                    return False
+                # Print status change
+                if current_state != last_state:
+                    log_event(f"Job {job_id} status: {state_name}")
+                    last_state = current_state
+
+                # Check for completion or error states
+                if current_state == 5:
+                    reasons = cupsConn.getJobAttributes(job_id).get("job-printer-state-reasons", [])
+                    if len(reasons) > 1:
+                        current_error = None
+                        if "marker-supply-empty-error" in reasons and "input-tray-missing" in reasons:
+                            current_error = "No paper casette/ink cartridge or both"
+                        elif "media-empty-error" in reasons:
+                            current_error = "Out of paper"
+                        elif "marker-supply-empty-error" in reasons:
+                            current_error = "Out of ink or ink cartridge missing"
+                        elif "input-tray-missing" in reasons:
+                            current_error = "Paper casette missing or incorrectly inserted"
+                        if current_error is not None and last_error != current_error:
+                            log_error(current_error)
+                            last_error = current_error
+
+                elif current_state == 9:  # completed
+                    log_event(f"✓ Job {job_id} completed successfully!")
+                    return True
+                elif current_state in [7, 8]:  # canceled or aborted
+                    log_error(f"✗ Job {job_id} {state_name}")
+                    return False
+            else:
+                # Job not in queue
+                if job_found:
+                    # Job was found before but now gone - it completed
+                    log_event(f"✓ Job {job_id} no longer in queue. Assuming It completed successfully.")
+                    return True
+                else:
+                    # Job never found - might have completed immediately
+                    # Try a few more times before giving up
+                    if time.time() - start_time > 5:
+                        log_error(f"✗ Job never found. Stopping tracking.")
+                        return False
+
+            time.sleep(config["print_tracking_interval"])
+
+        except:
+            log_error(f"Error tracking job: {e}")
+            traceback.print_exc()
+            return False
+    
 
 def raise_flag():
     global flag_raised
     if flag_raised:
-        log_error("Flag already raised, skipping...")
+        log_error("Flag already raised, skipping.")
         return
     
-    flag_raised = True
-    log_event("Waiting " + str(config["rise_delay"]) + " seconds before rising flag")
-    time.sleep(config["rise_delay"])
+    log_event("Raising flag.")
 
     try:
         log_event("Raising flag...")
         set_servo_angle(config["flag_up_angle"])
+        flag_raised = True
 
         log_event("Waiting for button press...")
         button.wait_for_press()
@@ -382,23 +553,6 @@ def raise_flag():
 def generate_file_name(directory, mime):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return os.path.join(directory, f"{timestamp}.{mime}")
-
-def _on_door_open():
-    global _refill_press_count, _last_refill_press_time
-    if not waiting_for_refill:
-        return
-
-    now = time.time()
-    if now - _last_refill_press_time > 5:
-        _refill_press_count = 0
-    _last_refill_press_time = now
-
-    _refill_press_count += 1
-    log_event(f"Door opened ({_refill_press_count}/3)")
-
-    if _refill_press_count >= 3:
-        _perform_refill()
-        _refill_press_count = 0
 
 def init_servo():
     global servo
