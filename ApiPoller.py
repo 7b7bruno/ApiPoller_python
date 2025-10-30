@@ -14,6 +14,7 @@ from huawei_lte_api.Client import Client  # type: ignore
 from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
 import cups
 import traceback
+import enum
 
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
@@ -120,6 +121,17 @@ refill_type = None
 
 # CUPS connection
 cupsConn = None
+
+# State enum
+class State(enum):
+    IDLE = "idle"
+    INCOMING_TRANSMISSION = "incoming_transmission"
+    MESSAGE_RECEIVED = "message_received"
+    OUT_OF_PAPER = "out_of_paper"
+    OUT_OF_INK = "out_of_ink"
+    OUT_OF_INK_AND_PAPER = "out_of_ink_and_paper"
+
+state = State.IDLE
 
 # Setup logging
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
@@ -342,30 +354,44 @@ def check_for_new_messages():
             request_timeout_interval = config["request_timeout_interval"]
             log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
 
+
+
 def handle_message(config, data):
+    global state
+    state = State.INCOMING_TRANSMISSION
+
+    def handle_transmission_failure():
+        if state is not State.MESSAGE_RECEIVED:
+            state = State.IDLE
+
     message_id = data.get("id", None)
     
     if message_id is None:
         log_error("Retrieved message contains invalid message id. Skipping.")
+        handle_transmission_failure()
         return
     
     image_path = get_image(config, message_id)
     if image_path is None:
         log_error("Failed to pull image.")
+        handle_transmission_failure()
         return
 
     job_id = print_image(image_path)
     if job_id is None:
         log_error("Failed to print.")
+        handle_transmission_failure()
         return
 
     print_completed = track_print(job_id)
     if print_completed:
+        state = State.MESSAGE_RECEIVED
         flag_thread = threading.Thread(target=raise_flag, daemon=True)
         flag_thread.start()
         ack_message(message_id)
     else:
         log_error("Print tracking failed. Not raising flag. Ack'ing message")
+        handle_transmission_failure()
         ack_message(message_id)
 
 def get_image(config, message_id):
@@ -453,6 +479,7 @@ def print_image(image_path):
         return None
 
 def track_print(job_id):
+    global state
     log_event(f"Tracking job {job_id}...")
     # IPP job states
     job_states = {
@@ -491,15 +518,21 @@ def track_print(job_id):
                         current_error = None
                         if "marker-supply-empty-error" in reasons and "input-tray-missing" in reasons:
                             current_error = "No paper casette/ink cartridge or both"
+                            state = State.OUT_OF_INK_AND_PAPER
                         elif "media-empty-error" in reasons:
                             current_error = "Out of paper"
+                            state = State.OUT_OF_PAPER
                         elif "marker-supply-empty-error" in reasons:
                             current_error = "Out of ink or ink cartridge missing"
+                            state = State.OUT_OF_INK
                         elif "input-tray-missing" in reasons:
                             current_error = "Paper casette missing or incorrectly inserted"
+                            state = State.OUT_OF_PAPER
                         if current_error is not None and last_error != current_error:
                             log_error(current_error)
                             last_error = current_error
+                    elif last_error is not None:
+                        state = State.INCOMING_TRANSMISSION
 
                 elif current_state == 9:  # completed
                     log_event(f"✓ Job {job_id} completed successfully!")
@@ -529,7 +562,7 @@ def track_print(job_id):
     
 
 def raise_flag():
-    global flag_raised
+    global flag_raised, state
     if flag_raised:
         log_error("Flag already raised, skipping.")
         return
@@ -544,11 +577,15 @@ def raise_flag():
         log_event("Waiting for button press...")
         button.wait_for_press()
 
+        if state is not State.INCOMING_TRANSMISSION:
+            state = State.IDLE
         log_event("Lowering flag...")
         set_servo_angle(config["flag_down_angle"])
         flag_raised = False
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
+        if state is not State.INCOMING_TRANSMISSION:
+            state = State.IDLE
         flag_raised = False
 
 def generate_file_name(directory, mime):
@@ -587,15 +624,20 @@ def set_led_color(red, green, blue):
 def update_led_status():
     global flag_raised
     while True:
-        if waiting_for_refill:
-            if refill_type == "paper":
-                set_led_color(1, 1, 0)
-            else:
+        match state:
+            case State.IDLE:
+                set_led_color(0, 1, 0)
+            case State.INCOMING_TRANSMISSION:
+                set_led_color(0, 0, 1)
+            case State.MESSAGE_RECEIVED:
+                set_led_color(0, 1, 1)
+            case State.OUT_OF_INK:
                 set_led_color(1, 0, 0)
-        elif flag_raised:
-            set_led_color(0, 0, 1)  # Blue (message received, flag raised)
-        else:
-            set_led_color(0, 1, 0)  # Green (normal operation)
+            case State.OUT_OF_PAPER:
+                set_led_color(1, 0, 0)
+            case State.OUT_OF_INK_AND_PAPER:
+                set_led_color(1, 0, 0)
+                
         time.sleep(0.5)
 
 # Function to control LED color
