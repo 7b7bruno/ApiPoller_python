@@ -362,6 +362,7 @@ def handle_message(config, data):
     print_completed = track_print(job_id)
     if print_completed:
         flag_thread = threading.Thread(target=raise_flag, daemon=True)
+        flag_thread.start()
         ack_message(message_id)
     else:
         log_error("Print tracking failed. Not raising flag. Ack'ing message")
