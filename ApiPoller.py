@@ -123,7 +123,7 @@ refill_type = None
 cupsConn = None
 
 # State enum
-class State(enum):
+class State(enum.Enum):
     IDLE = "idle"
     INCOMING_TRANSMISSION = "incoming_transmission"
     MESSAGE_RECEIVED = "message_received"
@@ -637,7 +637,7 @@ def update_led_status():
                 set_led_color(1, 0, 0)
             case State.OUT_OF_INK_AND_PAPER:
                 set_led_color(1, 0, 0)
-                
+
         time.sleep(0.5)
 
 # Function to control LED color
