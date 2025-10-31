@@ -345,10 +345,10 @@ def getHeaders():
 
     headers = {
         "Authorization": config["printer_token"],
-        "X-Modem-RSRP": data["rsrp"],
-        "X-Modem-RSRQ": data["rsrq"],
-        "X-Modem-SINR": data["sinr"],
-        "X-Modem-Download-Speed": last_download_speed,
+        "X-Modem-RSRP": str(data["rsrp"]),
+        "X-Modem-RSRQ": str(data["rsrq"]),
+        "X-Modem-SINR": str(data["sinr"]),
+        "X-Modem-Download-Speed": str(last_download_speed),
         "X-Printer-Status": status
     }
 
