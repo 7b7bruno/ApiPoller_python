@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "refill_url": "/printer/refill",
     "flag_state_url": "/special/flag",
     "modem_restart_url": "/printer/modem-restart",
+    "auth_check_url": "/auth/check",
     "modem_gateway_url": "http://192.168.8.1",
     "print_command": "/snap/bin/cups.lp",
     "printer_name": "Canon_SELPHY_CP1500",
@@ -479,6 +480,14 @@ def ack_message(message_id):
             log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
             time.sleep(5)
 
+def send_status():
+    log_event(f"Sending printer status - {state} - to server.")
+    try:
+        response = requests.get(f"{config['url']}{config['auth_check_url']}", headers=getHeaders(), timeout=config["request_timeout_interval"])
+        log_event(response.text)
+    except requests.exceptions.RequestException as e:
+        log_error(f"Failed to send printer status to server: {e}")
+
 def print_image(image_path):
     log_event("Printing image...")
     if not os.path.exists(image_path):
@@ -560,8 +569,10 @@ def track_print(job_id):
                         if current_error is not None and last_error != current_error:
                             log_error(current_error)
                             last_error = current_error
+                            send_status()
                     elif last_error is not None:
                         state = State.INCOMING_TRANSMISSION
+                        send_status()
 
                 elif current_state == 9:  # completed
                     log_event(f"✓ Job {job_id} completed successfully!")
