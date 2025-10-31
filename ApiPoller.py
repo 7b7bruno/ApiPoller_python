@@ -15,6 +15,7 @@ from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
 import cups
 import traceback
 import enum
+import math
 from classes.huawei_modem_reader import HuaweiModemReader
 
 CONFIG_FILE = "config.json"
@@ -454,7 +455,7 @@ def save_image(config, response, message_id):
                 f.write(chunk)
             elapsed = time.time() - start
             speed_kbps = (total_bytes / 1024) / elapsed
-            last_download_speed = speed_kbps
+            last_download_speed = math.floor(speed_kbps)
         
         log_event(f"Image saved to {image_path}")
         return image_path
