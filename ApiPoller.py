@@ -347,6 +347,8 @@ def getHeaders():
 
     headers = {
         "Authorization": config["printer_token"],
+        "X-Modem-Operator": data["operator_name"],
+        "X-Modem-Network-Mode": data["network_mode"],
         "X-Modem-RSRP": str(data["rsrp"]),
         "X-Modem-RSRQ": str(data["rsrq"]),
         "X-Modem-SINR": str(data["sinr"]),
