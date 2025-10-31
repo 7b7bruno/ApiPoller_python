@@ -341,7 +341,7 @@ def getHeaders():
         data = reader.get_signal_data()
 
     if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER]:
-        status = state
+        status = state.value
     else:
         status = "Normal"
 
