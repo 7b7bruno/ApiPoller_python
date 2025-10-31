@@ -15,6 +15,7 @@ from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
 import cups
 import traceback
 import enum
+from classes.huawei_modem_reader import HuaweiModemReader
 
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
@@ -124,14 +125,17 @@ cupsConn = None
 
 # State enum
 class State(enum.Enum):
-    IDLE = "idle"
-    INCOMING_TRANSMISSION = "incoming_transmission"
-    MESSAGE_RECEIVED = "message_received"
-    OUT_OF_PAPER = "out_of_paper"
-    OUT_OF_INK = "out_of_ink"
-    OUT_OF_INK_AND_PAPER = "out_of_ink_and_paper"
+    IDLE = "Idle"
+    INCOMING_TRANSMISSION = "Incoming transmission"
+    MESSAGE_RECEIVED = "Message received"
+    OUT_OF_PAPER = "Out of paper"
+    OUT_OF_INK = "Out of ink"
+    OUT_OF_INK_AND_PAPER = "Out of ink and paper"
 
 state = State.IDLE
+
+# Speed of last download
+last_download_speed = None
 
 # Setup logging
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
@@ -330,16 +334,33 @@ def check_config(data):
 
     return token.isalnum()
 
+def getHeaders(): 
+    with HuaweiModemReader(config["modem_gateway_url"]) as reader:
+        data = reader.get_signal_data()
+
+    if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER]:
+        status = state
+    else:
+        status = "Normal"
+
+    headers = {
+        "Authorization": config["printer_token"],
+        "X-Modem-RSRP": data["rsrp"],
+        "X-Modem-RSRQ": data["rsrq"],
+        "X-Modem-SINR": data["sinr"],
+        "X-Modem-Download-Speed": last_download_speed,
+        "X-Printer-Status": status
+    }
+
+    return headers
+
 def check_for_new_messages():
     global last_successful_request
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
 
-    headers = {
-        "Authorization": config["printer_token"],
-    }
     while True:
         try:
-            response = requests.get(config["url"] + config["request_url"], headers=headers, timeout=config["request_timeout_interval"])
+            response = requests.get(config["url"] + config["request_url"], headers=getHeaders(), timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
                 log_event("New message found")
                 handle_message(config, response.json())
@@ -396,10 +417,9 @@ def handle_message(config, data):
 
 def get_image(config, message_id):
     log_event("Getting image...")
-    headers = {"Authorization": config["printer_token"]}
     while True:
         try:
-            response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=headers, stream=True, timeout=config["request_timeout_interval"])
+            response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=getHeaders(), stream=True, timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'image' in response.headers.get('Content-Type', ''):
                 log_event("Image pulled.")
                 image_path = save_image(config, response, message_id)
@@ -417,6 +437,7 @@ def get_image(config, message_id):
             time.sleep(5)
 
 def save_image(config, response, message_id):
+    global last_download_speed
     try:
         mime = response.headers['Content-Type'].split('/')[1]
         filename = generate_file_name(config["image_path"], mime)
@@ -424,8 +445,16 @@ def save_image(config, response, message_id):
         image_path = os.path.join(config["image_path"], filename)
         
         with open(image_path, 'wb') as f:
+            start = time.time()
+            total_bytes = 0
+            chunks = []
             for chunk in response.iter_content(1024):
+                chunks.append(chunk)
+                total_bytes += len(chunk)
                 f.write(chunk)
+            elapsed = time.time() - start
+            speed_kbps = (total_bytes / 1024) / elapsed
+            last_download_speed = speed_kbps
         
         log_event(f"Image saved to {image_path}")
         return image_path
@@ -439,10 +468,9 @@ def save_image(config, response, message_id):
 
 def ack_message(message_id):
     log_event(f"Acknowledging message ID: {message_id}")
-    headers = {"Authorization": config["printer_token"]}
     while True:
         try:
-            response = requests.post(f"{config['url']}{config['ack_url']}?message_id={message_id}", headers=headers, timeout=config["request_timeout_interval"])
+            response = requests.post(f"{config['url']}{config['ack_url']}?message_id={message_id}", headers=getHeaders(), timeout=config["request_timeout_interval"])
             log_event(response.text)
             break
         except requests.exceptions.RequestException as e:
