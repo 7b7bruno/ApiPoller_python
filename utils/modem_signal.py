@@ -7,8 +7,8 @@ python3 signal_bars.py http://admin:PASSWORD@192.168.8.1/
 """
 
 from argparse import ArgumentParser
-from huawei_lte_api.Connection import Connection
-from huawei_lte_api.Client import Client
+from huawei_lte_api.Connection import Connection #type: ignore
+from huawei_lte_api.Client import Client #type: ignore
 import re
 
 SIGNAL_LEVELS = {
