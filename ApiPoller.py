@@ -574,6 +574,7 @@ def track_print(job_id):
                             send_status()
                     elif last_error is not None:
                         state = State.INCOMING_TRANSMISSION
+                        last_error = None
                         send_status()
 
                 elif current_state == 9:  # completed
