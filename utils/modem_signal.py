@@ -59,11 +59,6 @@ def generate_signal_bars(level: int, total: int = 5) -> str:
     return "\n".join(result)
 
 def main():
-    parser = ArgumentParser()
-    parser.add_argument('url', type=str)
-    parser.add_argument('--username', type=str)
-    parser.add_argument('--password', type=str)
-    args = parser.parse_args()
 
     with Connection("http://192.168.8.1") as connection:
         client = Client(connection)
