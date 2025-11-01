@@ -689,6 +689,8 @@ def update_led_status():
                 set_led_color(1, 0, 1)
             case State.NO_CONNECTION:
                 set_led_color(1, 0, 0)
+            case State.BOOTING:
+                set_led_color(1, 1, 0)
 
         time.sleep(0.5)
 
