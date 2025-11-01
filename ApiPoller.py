@@ -103,6 +103,8 @@ class ConfigManager:
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
 
+VERSION = "V0.2.1"
+
 last_successful_request = time.time()
 last_successful_command_request = time.time()
 
@@ -127,14 +129,16 @@ cupsConn = None
 
 # State enum
 class State(enum.Enum):
+    BOOTING = "Booting"
     IDLE = "Idle"
     INCOMING_TRANSMISSION = "Incoming transmission"
     MESSAGE_RECEIVED = "Message received"
     OUT_OF_PAPER = "Out of paper"
     OUT_OF_INK = "Out of ink"
     OUT_OF_INK_AND_PAPER = "Out of ink and paper"
+    WAITING_FOR_CUPS = "Waiting for CUPS to start"
 
-state = State.IDLE
+state = State.BOOTING
 
 # Speed of last download
 last_download_speed = None
@@ -340,7 +344,7 @@ def getHeaders():
     with HuaweiModemReader(config["modem_gateway_url"]) as reader:
         data = reader.get_signal_data()
 
-    if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER]:
+    if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.BOOTING, State.WAITING_FOR_CUPS]:
         status = state.value
     else:
         status = "Normal"
@@ -359,7 +363,7 @@ def getHeaders():
     return headers
 
 def check_for_new_messages():
-    global last_successful_request
+    global last_successful_request, state
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
 
     while True:
@@ -374,6 +378,7 @@ def check_for_new_messages():
             else:
                 log_error(f"Error: {response.status_code}")
             last_successful_request = time.time()
+            state = State.IDLE
             break
         except requests.exceptions.RequestException as e:
             request_timeout_interval = config["request_timeout_interval"]
@@ -680,6 +685,8 @@ def update_led_status():
                 set_led_color(1, 0, 0)
             case State.OUT_OF_INK_AND_PAPER:
                 set_led_color(1, 0, 0)
+            case State.WAITING_FOR_CUPS:
+                set_led_color(1, 0, 1)
 
         time.sleep(0.5)
 
@@ -807,37 +814,55 @@ def flagDown():
     set_servo_angle(config["flag_down_angle"])
 
 def init_CUPS():
-    global cupsConn
+    global cupsConn, state
     log_event(f"Waiting {config["initial_delay"]}s before connecting to cups")
     time.sleep(config["initial_delay"])
-    for attempt in range(config["cups_retries"]):
+    state = State.WAITING_FOR_CUPS
+    start = time.time()
+    attempt = 1
+    state_sent = False
+    while True:
         try:
             cupsConn = cups.Connection()
             cupsConn.getPrinters()
-            print("CUPS connected")
+            log_event("CUPS connected")
+            state = State.BOOTING
+            if state_sent:
+                send_status()
             return True
         except RuntimeError as e:
-            if attempt < config["cups_retries"] - 1:
-                print(f"Waiting for CUPS... ({attempt + 1}/{config['cups_retries']})")
-                time.sleep(1)
-            else:
-                raise Exception(f"CUPS not available after {config["cups_retries"]}")
+            print(f"Connection failed. {time.time() - start}s since start. Attempt [{attempt + 1}/{config['cups_retries']}]")
+            if not state_sent:
+                send_status()
+                state_sent = True
+            time.sleep(1)
+            if time.time() - start > 300:
+                log_error("Cups hasn't started in 5 minutes. Rebooting...")
+                reboot()
+            attempt += 1
     return None
 
 if __name__ == "__main__":
+    log_event(f"GPK {VERSION} started")
     init_config()
+    log_event("conf initialized")
     init_GPIO()
+    log_event("GPIO initialized")
     init_led()
     init_paper_led()
+    log_event("LEDs initialized")
     init_servo()
+    log_event("Servo initialized")
     init_CUPS()
-    log_event("Gimenio started")
+    log_event("CUPS initialized")
+    
     if config["reboot_modem"] is True:
         threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
         log_event("Modem restart thread started")
     init_command_thread()
     log_event("Command thread started")
     log_event("DEMO PRINTER. Paper and ink level tracking disabled.")
+    state = State.IDLE
     while True:
         try:
             # check_supply_levels()
