@@ -137,6 +137,7 @@ class State(enum.Enum):
     OUT_OF_INK = "Out of ink"
     OUT_OF_INK_AND_PAPER = "Out of ink and paper"
     WAITING_FOR_CUPS = "Waiting for CUPS to start"
+    NO_CONNECTION = "No connection"
 
 state = State.BOOTING
 
@@ -289,8 +290,6 @@ def init_config():
         log_error("Please enter a valid printer token in the config file and restart.")
         exit()
 
-    update_config()
-
 def load_config_file():
     global config
     with open(CONFIG_FILE, 'r') as f:
@@ -298,6 +297,7 @@ def load_config_file():
     config.update_from_dict(config_dict)
 
 def update_config():
+    global state
     retries = 30
     while retries > 0:
         try:
@@ -319,10 +319,11 @@ def update_config():
             else:
                 log_error(f"Error: {response.status_code}")
                 retries -= 1
+            state = State.BOOTING
             break
         except requests.exceptions.RequestException as e:
-            request_timeout_interval = config["request_timeout_interval"]
             log_error(f"Connection lost: {e}. Retrying in 1s...")
+            state = State.NO_CONNECTION
             time.sleep(1)
             retries -= 1
 
@@ -686,6 +687,8 @@ def update_led_status():
                 set_led_color(1, 0, 0)
             case State.WAITING_FOR_CUPS:
                 set_led_color(1, 0, 1)
+            case State.NO_CONNECTION:
+                set_led_color(1, 0, 0)
 
         time.sleep(0.5)
 
@@ -840,12 +843,14 @@ def init_CUPS():
 if __name__ == "__main__":
     log_event(f"GPK {VERSION} started")
     init_config()
-    log_event("conf initialized")
+    log_event("conf loaded from file")
     init_GPIO()
     log_event("GPIO initialized")
     init_led()
     init_paper_led()
     log_event("LEDs initialized")
+    update_config()
+    log_event("conf updated from server")
     init_servo()
     log_event("Servo initialized")
     init_CUPS()
