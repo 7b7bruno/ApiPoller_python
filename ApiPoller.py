@@ -103,7 +103,7 @@ class ConfigManager:
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
 
-VERSION = "V0.2.1"
+VERSION = "V0.2.2"
 
 last_successful_request = time.time()
 last_successful_command_request = time.time()
@@ -148,12 +148,14 @@ logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 def log_event(message):
-    print(message)
-    logging.info(message)
+    timestamp = "[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "]"
+    print(f"{timestamp} - {message}")
+    logging.info(f"{timestamp} - {message}")
 
 def log_error(message):
-    print(f"ERROR: {message}")
-    logging.error(message)
+    timestamp = "[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "]"
+    print(f"{timestamp} - {message}")
+    logging.error(f"{timestamp} - {message}")
 
 def modem_reboot_scheduler():
     while True:
@@ -296,13 +298,10 @@ def load_config_file():
     config.update_from_dict(config_dict)
 
 def update_config():
-    headers = {
-        "Authorization": config["printer_token"],
-    }
     retries = 30
     while retries > 0:
         try:
-            response = requests.get(config["url"] + config["config_url"], headers=headers, timeout=config["request_timeout_interval"])
+            response = requests.get(config["url"] + config["config_url"], headers=getHeaders(), timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
                 log_event("Config retrieved")
                 data = response.json()
@@ -323,7 +322,7 @@ def update_config():
             break
         except requests.exceptions.RequestException as e:
             request_timeout_interval = config["request_timeout_interval"]
-            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
+            log_error(f"Connection lost: {e}. Retrying in 1s...")
             time.sleep(1)
             retries -= 1
 
@@ -759,7 +758,7 @@ def check_for_new_commands():
             # elif response.status_code == 201:
             #     print("No new commands found")
             #     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
-            else:
+            elif response.status_code != 201:
                 log_error(f"Command check error: {response.status_code}")
             last_successful_command_request = time.time()
             break
@@ -788,10 +787,9 @@ def dispatchCommand(data):
 
 def ackCommand(command_id):
     log_event(f"Acknowledging command. ID: {command_id}")
-    headers = {"Authorization": config["printer_token"]}
     while True:
         try:
-            response = requests.post(f"{config['url']}{config['command_ack_url']}?command_id={command_id}", headers=headers, timeout=config["request_timeout_interval"])
+            response = requests.post(f"{config['url']}{config['command_ack_url']}?command_id={command_id}", headers=getHeaders(), timeout=config["request_timeout_interval"])
             log_event(response.text)
             break
         except requests.exceptions.RequestException as e:
