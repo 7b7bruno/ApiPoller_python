@@ -750,17 +750,14 @@ def pollCommands():
 
 def check_for_new_commands():
     global last_successful_command_request
-    headers = {
-        "Authorization": config["printer_token"],
-    }
     while True:
         try:
-            response = requests.get(config["url"] + config["command_url"], headers=headers, timeout=config["request_timeout_interval"])
+            response = requests.get(config["url"] + config["command_url"], headers=getHeaders(), timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
                 log_event("New command found")
                 dispatchCommand(response.json())
-            elif response.status_code == 201:
-                log_event("No new commands found")
+            # elif response.status_code == 201:
+            #     print("No new commands found")
             #     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
             else:
                 log_error(f"Command check error: {response.status_code}")
