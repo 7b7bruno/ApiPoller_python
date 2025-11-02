@@ -103,7 +103,7 @@ class ConfigManager:
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
 
-VERSION = "V0.2.5"
+VERSION = "V0.2.6"
 
 last_successful_request = time.time()
 last_successful_command_request = time.time()
@@ -831,8 +831,8 @@ def flagDown():
 def init_CUPS():
     global cupsConn, state
     log_event(f"Waiting {config["initial_delay"]}s before connecting to cups")
-    time.sleep(config["initial_delay"])
     state = State.WAITING_FOR_CUPS
+    time.sleep(config["initial_delay"])
     start = time.time()
     attempt = 1
     state_sent = False
