@@ -133,6 +133,7 @@ class State(enum.Enum):
     IDLE = "Idle"
     INCOMING_TRANSMISSION = "Incoming transmission"
     MESSAGE_RECEIVED = "Message received"
+    ACKNOWLEDGING = "Acknowledging message"
     OUT_OF_PAPER = "Out of paper"
     OUT_OF_INK = "Out of ink"
     OUT_OF_INK_AND_PAPER = "Out of ink and paper"
@@ -358,7 +359,7 @@ def getHeaders():
     with HuaweiModemReader(config["modem_gateway_url"]) as reader:
         data = reader.get_signal_data()
 
-    if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.BOOTING, State.WAITING_FOR_CUPS]:
+    if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
         status = state.value
     else:
         status = "Normal"
@@ -432,9 +433,11 @@ def handle_message(config, data):
     print_completed = track_print(job_id)
     if print_completed:
         state = State.MESSAGE_RECEIVED
-        flag_thread = threading.Thread(target=raise_flag, daemon=True)
+        ack_complete_event = threading.Event()
+        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event,), daemon=True)
         flag_thread.start()
         ack_message(message_id)
+        ack_complete_event.set()  # Signal that ACK is complete
     else:
         log_error("Print tracking failed. Not raising flag. Ack'ing message")
         handle_transmission_failure()
@@ -625,12 +628,12 @@ def track_print(job_id):
             return False
     
 
-def raise_flag():
+def raise_flag(ack_complete_event):
     global flag_raised, state
     if flag_raised:
         log_error("Flag already raised, skipping.")
         return
-    
+
     log_event("Raising flag.")
 
     try:
@@ -641,11 +644,19 @@ def raise_flag():
         log_event("Waiting for button press...")
         button.wait_for_press()
 
-        if state is not State.INCOMING_TRANSMISSION:
-            state = State.IDLE
         log_event("Lowering flag...")
         set_servo_angle(config["flag_down_angle"])
         flag_raised = False
+
+        # Check if ACK is still in progress
+        if not ack_complete_event.is_set():
+            state = State.ACKNOWLEDGING
+            log_event("Waiting for acknowledgment to complete...")
+            ack_complete_event.wait()  # Wait for ACK to finish
+
+        # ACK is done, reset state
+        if state is not State.INCOMING_TRANSMISSION:
+            state = State.IDLE
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
         if state is not State.INCOMING_TRANSMISSION:
@@ -695,6 +706,8 @@ def update_led_status():
                 set_led_color(0, 0, 1)
             case State.MESSAGE_RECEIVED:
                 set_led_color(0, 1, 1)
+            case State.ACKNOWLEDGING:
+                set_led_color(1, 1, 1)
             case State.OUT_OF_INK:
                 set_led_color(1, 0, 0)
             case State.OUT_OF_PAPER:
