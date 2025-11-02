@@ -298,10 +298,15 @@ def load_config_file():
 
 def update_config():
     global state
-    retries = 30
+    log_event("Pulling config...")
+    if state in [State.BOOTING, State.NO_CONNECTION]:
+        headers = getInitialHeaders()
+    else:
+        headers = getHeaders()
+    retries = 15
     while retries > 0:
         try:
-            response = requests.get(config["url"] + config["config_url"], headers=getHeaders(), timeout=config["request_timeout_interval"])
+            response = requests.get(config["url"] + config["config_url"], headers=headers, timeout=config["request_timeout_interval"])
             if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
                 log_event("Config retrieved")
                 data = response.json()
@@ -339,6 +344,13 @@ def check_config(data):
         return False
 
     return token.isalnum()
+
+def getInitialHeaders():
+    headers = {
+        "Authorization": config["printer_token"]
+    }
+
+    return headers
 
 def getHeaders(): 
     with HuaweiModemReader(config["modem_gateway_url"]) as reader:
