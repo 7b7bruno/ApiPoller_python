@@ -406,6 +406,7 @@ def handle_message(config, data):
     state = State.INCOMING_TRANSMISSION
 
     def handle_transmission_failure():
+        global state
         if state is not State.MESSAGE_RECEIVED:
             state = State.IDLE
 
@@ -653,7 +654,7 @@ def raise_flag():
 
 def generate_file_name(directory, mime):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    return os.path.join(directory, f"{timestamp}.{mime}")
+    return f"{timestamp}.{mime}"
 
 def init_servo():
     global servo
