@@ -378,7 +378,8 @@ def check_for_new_messages():
             else:
                 log_error(f"Error: {response.status_code}")
             last_successful_request = time.time()
-            state = State.IDLE
+            if state is not State.MESSAGE_RECEIVED:
+                state = State.IDLE
             break
         except requests.exceptions.RequestException as e:
             request_timeout_interval = config["request_timeout_interval"]
