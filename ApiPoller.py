@@ -103,7 +103,7 @@ class ConfigManager:
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
 
-VERSION = "V0.2.4"
+VERSION = "V0.2.5"
 
 last_successful_request = time.time()
 last_successful_command_request = time.time()
@@ -301,8 +301,10 @@ def update_config():
     log_event("Pulling config...")
     if state in [State.BOOTING, State.NO_CONNECTION]:
         headers = getInitialHeaders()
+        log_event("Using initial headers only")
     else:
         headers = getHeaders()
+        log_event("Using full headers")
     retries = 15
     while retries > 0:
         try:
