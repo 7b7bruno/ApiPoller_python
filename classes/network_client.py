@@ -87,7 +87,10 @@ class NetworkClient:
                  retry_backoff_factor: float = 2.0,
                  retry_max_delay: int = 60,
                  circuit_breaker_threshold: int = 5,
-                 circuit_breaker_cooldown: int = 60):
+                 circuit_breaker_cooldown: int = 60,
+                 on_connection_weak: Optional[Callable] = None,
+                 on_connection_lost: Optional[Callable] = None,
+                 on_connection_restored: Optional[Callable] = None):
         """
         Initialize NetworkClient with configuration.
 
@@ -102,12 +105,20 @@ class NetworkClient:
             retry_max_delay: Maximum delay between retries (seconds)
             circuit_breaker_threshold: Failures before opening circuit
             circuit_breaker_cooldown: Cooldown period when circuit is open (seconds)
+            on_connection_weak: Callback to call when first connection failure occurs
+            on_connection_lost: Callback to call when connection is completely lost
+            on_connection_restored: Callback to call when connection is restored
         """
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
         self.retry_max_attempts = retry_max_attempts
         self.retry_backoff_factor = retry_backoff_factor
         self.retry_max_delay = retry_max_delay
+        self.on_connection_weak = on_connection_weak
+        self.on_connection_lost = on_connection_lost
+        self.on_connection_restored = on_connection_restored
+        self.connection_failed = False
+        self.connection_weak = False
 
         # Create session with connection pooling
         self.session = requests.Session()
@@ -200,10 +211,25 @@ class NetworkClient:
                 # Raise for HTTP errors (4xx, 5xx)
                 response.raise_for_status()
 
+                # Connection succeeded - restore state if we were in failed state
+                if self.connection_failed or self.connection_weak:
+                    self.connection_failed = False
+                    self.connection_weak = False
+                    if self.on_connection_restored:
+                        logging.info("Connection restored")
+                        self.on_connection_restored()
+
                 return response
 
             except Exception as e:
                 last_exception = e
+
+                # First failure - mark connection as weak
+                if attempt == 0 and not self.connection_weak and not self.connection_failed:
+                    self.connection_weak = True
+                    if self.on_connection_weak:
+                        logging.warning("Connection weak - first failure detected")
+                        self.on_connection_weak()
 
                 if attempt < max_attempts - 1:
                     delay = self._exponential_backoff_with_jitter(attempt)
@@ -216,6 +242,13 @@ class NetworkClient:
                     logging.error(
                         f"Request to {url} failed after {max_attempts} attempts: {e}"
                     )
+                    # All retries exhausted - mark connection as completely failed
+                    if not self.connection_failed:
+                        self.connection_failed = True
+                        self.connection_weak = False  # No longer weak, it's completely lost
+                        if self.on_connection_lost:
+                            logging.warning("Connection lost - all retries exhausted")
+                            self.on_connection_lost()
 
         raise last_exception
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image
 import subprocess
 import threading
-from gpiozero import AngularServo, Button, OutputDevice # type: ignore
+from gpiozero import AngularServo, Button, PWMLED # type: ignore
 from huawei_lte_api.Connection import Connection  # type: ignore
 from huawei_lte_api.Client import Client  # type: ignore
 from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
@@ -116,7 +116,7 @@ class ConfigManager:
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
 
-VERSION = "V0.2.6"
+VERSION = "V0.2.7"
 
 last_successful_request = time.time()
 last_successful_command_request = time.time()
@@ -155,9 +155,11 @@ class State(enum.Enum):
     OUT_OF_INK = "Out of ink"
     OUT_OF_INK_AND_PAPER = "Out of ink and paper"
     WAITING_FOR_CUPS = "Waiting for CUPS to start"
+    CONNECTION_WEAK = "Connection weak"
     NO_CONNECTION = "No connection"
 
 state = State.BOOTING
+state_before_connection_issue = None
 
 # Speed of last download
 last_download_speed = None
@@ -176,6 +178,34 @@ def log_error(message):
     print(f"{timestamp} - {message}")
     logging.error(f"{timestamp} - {message}")
 
+def on_network_connection_weak():
+    """Callback when network connection has first failure."""
+    global state, state_before_connection_issue
+    # Only save previous state if we're not already in a connection issue state
+    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION]:
+        state_before_connection_issue = state
+    state = State.CONNECTION_WEAK
+
+def on_network_connection_lost():
+    """Callback when network connection is completely lost (all retries exhausted)."""
+    global state, state_before_connection_issue
+    # Only save previous state if we're not already in a connection issue state
+    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION]:
+        state_before_connection_issue = state
+    state = State.NO_CONNECTION
+
+def on_network_connection_restored():
+    """Callback when network connection is restored."""
+    global state, state_before_connection_issue
+    # Restore to previous state if we were in a connection issue state
+    if state in [State.CONNECTION_WEAK, State.NO_CONNECTION]:
+        if state_before_connection_issue is not None:
+            state = state_before_connection_issue
+            state_before_connection_issue = None
+        else:
+            # Fallback to IDLE if we don't have a previous state
+            state = State.IDLE
+
 def init_network_client():
     """Initialize network client and recovery manager with configuration."""
     global network_client, recovery_manager
@@ -190,7 +220,10 @@ def init_network_client():
         retry_backoff_factor=config["retry_backoff_factor"],
         retry_max_delay=config["retry_max_delay"],
         circuit_breaker_threshold=config["circuit_breaker_threshold"],
-        circuit_breaker_cooldown=config["circuit_breaker_cooldown"]
+        circuit_breaker_cooldown=config["circuit_breaker_cooldown"],
+        on_connection_weak=on_network_connection_weak,
+        on_connection_lost=on_network_connection_lost,
+        on_connection_restored=on_network_connection_restored
     )
 
     recovery_manager = RecoveryManager(
@@ -240,90 +273,6 @@ def send_modem_reboot():
         log_error(f"Error notifying server of modem reboot after all retries: {e}")
         return False
 
-def load_status():
-    """Load printer status from file, create default if missing."""
-    if not os.path.exists(STATUS_FILE):
-        status = {"paper": config["paper_capacity"], "ink": config["ink_capacity"]}
-        save_status(status)
-    else:
-        with open(STATUS_FILE, 'r') as f:
-            status = json.load(f)
-    return status
-
-def save_status(status):
-    """Save printer status to file."""
-    with open(STATUS_FILE, 'w') as f:
-        json.dump(status, f, indent=4)
-
-def check_supply_levels():
-    """Check if ink or paper is empty and stop operation if needed."""
-    global waiting_for_refill, refill_type
-    status = load_status()
-    if status["paper"] == 0 and status["ink"] > 0:
-        waiting_for_refill = True
-        refill_type = "paper"
-        set_led_color(1, 1, 0)     # Yellow
-        log_event("Out of paper — waiting for refill")
-    elif status["ink"] == 0:
-        waiting_for_refill = True
-        refill_type = "ink" if status["paper"] > 0 else "both"
-        set_led_color(1, 0, 0)     # Red
-        log_event("Out of ink — waiting for refill")
-    return status
-
-def check_for_refill():
-    """Poll API endpoint to check if printer has been refilled."""
-    try:
-        headers = {"Authorization": config["printer_token"]}
-        response = network_client.get(
-            config["url"] + config["refill_url"],
-            headers=headers,
-            max_attempts=3
-        )
-        if response.status_code == 200:
-            refill_data = response.json()
-            refilled = False
-            status = load_status()
-
-            if refill_data.get("paper_refilled", False):
-                log_event("Paper refilled")
-                status["paper"] = config["paper_capacity"]
-                refilled = True
-
-            if refill_data.get("ink_refilled", False):
-                log_event("Ink refilled")
-                status["ink"] = config["ink_capacity"]
-                refilled = True
-
-            if refilled:
-                save_status(status)
-
-            return refilled
-
-    except Exception as e:
-        log_error(f"Error checking refill status: {e}")
-
-    return False
-
-def _perform_refill():
-    global waiting_for_refill, refill_type
-    status = load_status()
-
-    if refill_type in ("paper", "both"):
-        status["paper"] = config["paper_capacity"]
-        log_event("Paper manually refilled.")
-
-    if refill_type in ("ink", "both"):
-        status["ink"] = config["ink_capacity"]
-        status["paper"] = config["paper_capacity"]
-        log_event("Ink manually refilled.")
-
-    save_status(status)
-
-    waiting_for_refill = False
-    set_led_color(0, 1, 0)         # Green
-    log_event("Resumed normal operation after manual refill.")
-
 def init_config():
     global config
 
@@ -370,9 +319,6 @@ def update_config():
                 log_event("Config updated")
             else:
                 log_error("Pulled config doesn't pass integrity check, not using it.")
-        elif response.status_code == 201:
-            # log_event("No new messages found")
-            print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
         else:
             log_error(f"Error: {response.status_code}")
         state = State.BOOTING
@@ -759,20 +705,11 @@ def set_servo_angle(angle):
             time.sleep(1)
             servo.detach()
 
-# Function to control LED color
+# Function to control LED color with PWM (0.0-1.0 for each channel)
 def set_led_color(red, green, blue):
-    if red:
-        led_red.on()
-    else:
-        led_red.off()
-    if green:
-        led_green.on()
-    else:
-        led_green.off()
-    if blue:
-        led_blue.on()
-    else:
-        led_blue.off()
+    led_red.value = red
+    led_green.value = green
+    led_blue.value = blue
 
 # Function to update LED status based on flag state
 def update_led_status():
@@ -780,42 +717,35 @@ def update_led_status():
     while True:
         match state:
             case State.IDLE:
-                set_led_color(0, 1, 0)
+                set_led_color(0, 1, 0)  # Green
             case State.INCOMING_TRANSMISSION:
-                set_led_color(0, 0, 1)
+                set_led_color(0, 0, 1)  # Blue
             case State.MESSAGE_RECEIVED:
-                set_led_color(0, 1, 1)
+                set_led_color(0, 1, 1)  # Cyan
             case State.ACKNOWLEDGING:
-                set_led_color(1, 1, 1)
+                set_led_color(1, 1, 1)  # White
             case State.OUT_OF_INK:
-                set_led_color(1, 0, 0)
+                set_led_color(1, 0, 0)  # Red
             case State.OUT_OF_PAPER:
-                set_led_color(1, 0, 0)
+                set_led_color(1, 0, 0)  # Red
             case State.OUT_OF_INK_AND_PAPER:
-                set_led_color(1, 0, 0)
+                set_led_color(1, 0, 0)  # Red
             case State.WAITING_FOR_CUPS:
-                set_led_color(1, 0, 1)
+                set_led_color(1, 0, 1)  # Magenta
+            case State.CONNECTION_WEAK:
+                set_led_color(1, 0.3, 0)  # Orange (network issues, retrying)
             case State.NO_CONNECTION:
-                set_led_color(1, 0, 0)
+                set_led_color(1, 0, 0)  # Red (connection lost)
             case State.BOOTING:
-                set_led_color(1, 1, 0)
+                set_led_color(1, 1, 0)  # Yellow (initializing)
 
         time.sleep(0.5)
 
-# Function to control LED color
+# Function to control paper LED color with PWM (0.0-1.0 for each channel)
 def set_paper_led_color(red, green, blue):
-    if red:
-        paper_led_red.on()
-    else:
-        paper_led_red.off()
-    if green:
-        paper_led_green.on()
-    else:
-        paper_led_green.off()
-    if blue:
-        paper_led_blue.on()
-    else:
-        paper_led_blue.off()
+    paper_led_red.value = red
+    paper_led_green.value = green
+    paper_led_blue.value = blue
 
 # Function to update LED status based on flag state
 def update_paper_led_status():
@@ -825,9 +755,9 @@ def update_paper_led_status():
 
 def init_led():
     global led_red, led_green, led_blue
-    led_red = OutputDevice(config["led_pins"]["red"])
-    led_green = OutputDevice(config["led_pins"]["green"])
-    led_blue = OutputDevice(config["led_pins"]["blue"])
+    led_red = PWMLED(config["led_pins"]["red"])
+    led_green = PWMLED(config["led_pins"]["green"])
+    led_blue = PWMLED(config["led_pins"]["blue"])
 
     led_thread = threading.Thread(target=update_led_status, daemon=True)
     led_thread.start()
@@ -835,9 +765,9 @@ def init_led():
 def init_paper_led():
     global paper_led_red, paper_led_green, paper_led_blue
     if config["paper_led"] == True:
-        paper_led_red = OutputDevice(config["paper_led_pins"]["red"])
-        paper_led_green = OutputDevice(config["paper_led_pins"]["green"])
-        paper_led_blue = OutputDevice(config["paper_led_pins"]["blue"])
+        paper_led_red = PWMLED(config["paper_led_pins"]["red"])
+        paper_led_green = PWMLED(config["paper_led_pins"]["green"])
+        paper_led_blue = PWMLED(config["paper_led_pins"]["blue"])
 
         paper_led_thread = threading.Thread(target=update_paper_led_status, daemon=True)
         paper_led_thread.start()
