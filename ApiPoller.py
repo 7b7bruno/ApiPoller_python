@@ -158,9 +158,12 @@ class State(enum.Enum):
     CONNECTION_WEAK = "Connection weak"
     NO_CONNECTION = "No connection"
     CIRCUIT_BREAKER_OPEN = "Server down (circuit breaker open)"
+    MODEM_REBOOTING = "Modem rebooting"
 
 state = State.BOOTING
 state_before_connection_issue = None
+no_connection_since = None  # Timestamp when NO_CONNECTION state was entered
+last_modem_reboot_attempt = None  # Timestamp of last modem reboot attempt
 
 # Speed of last download
 last_download_speed = None
@@ -189,15 +192,24 @@ def on_network_connection_weak():
 
 def on_network_connection_lost():
     """Callback when network connection is completely lost (all retries exhausted)."""
-    global state, state_before_connection_issue
+    global state, state_before_connection_issue, no_connection_since
     # Only save previous state if we're not already in a connection issue state
     if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
         state_before_connection_issue = state
+    # Track when we entered NO_CONNECTION state
+    if no_connection_since is None:
+        no_connection_since = time.time()
+        log_event("Entered NO_CONNECTION state - modem reboot will trigger if this persists for 60+ seconds")
     state = State.NO_CONNECTION
 
 def on_network_connection_restored():
     """Callback when network connection is restored."""
-    global state, state_before_connection_issue
+    global state, state_before_connection_issue, no_connection_since
+    # Clear NO_CONNECTION timer
+    if no_connection_since is not None:
+        duration = time.time() - no_connection_since
+        log_event(f"Connection restored after {duration:.1f} seconds")
+        no_connection_since = None
     # Restore to previous state if we were in a connection issue state
     if state in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
         if state_before_connection_issue is not None:
@@ -255,46 +267,64 @@ def init_network_client():
 
     log_event("Network client initialized with keepalive and exponential backoff")
 
-def modem_reboot_scheduler():
-    while True:
-        time.sleep(config["modem_restart_trigger_interval"])
+def check_prolonged_no_connection():
+    """Check if we've been in NO_CONNECTION state too long and trigger modem reboot."""
+    global no_connection_since, last_modem_reboot_attempt
+
+    # Don't trigger if modem is already rebooting
+    if state == State.MODEM_REBOOTING:
+        return
+
+    # Only check if we're in NO_CONNECTION state
+    if state != State.NO_CONNECTION or no_connection_since is None:
+        return
+
+    # Calculate how long we've been disconnected
+    disconnected_duration = time.time() - no_connection_since
+
+    # Check if we've been disconnected for more than 60 seconds
+    if disconnected_duration > 60:
+        # Check cooldown - don't reboot more than once per 5 minutes
+        if last_modem_reboot_attempt is not None:
+            time_since_last_reboot = time.time() - last_modem_reboot_attempt
+            if time_since_last_reboot < 300:  # 5 minutes cooldown
+                log_event(f"NO_CONNECTION for {disconnected_duration:.0f}s, but modem was rebooted {time_since_last_reboot:.0f}s ago. Waiting...")
+                return
+
+        log_event(f"NO_CONNECTION persisted for {disconnected_duration:.0f}s - triggering modem reboot")
+        last_modem_reboot_attempt = time.time()
+        no_connection_since = None  # Reset timer to prevent immediate re-trigger
         reboot_modem()
 
 def reboot_modem():
+    global state, state_before_connection_issue
+
+    # Save current state before modem reboot
+    state_before_modem_reboot = state
+
     try:
         log_event("Rebooting modem...")
+        state = State.MODEM_REBOOTING
+
         with Connection(config["modem_gateway_url"]) as connection:
             client = Client(connection)
             if client.device.reboot() == ResponseEnum.OK.value:
                 log_event("Modem reboot requested successfully.")
-                time.sleep(30)
-                send_modem_reboot()
+
+                # Wait for modem to fully boot up before resuming operations
+                modem_boot_time = config["modem_boot_time"]
+                log_event(f"Waiting {modem_boot_time}s for modem to boot...")
+                time.sleep(modem_boot_time)
+                log_event("Modem should be ready now")
+
+                # Restore previous state
+                state = state_before_modem_reboot
             else:
                 log_error("Modem reboot failed.")
+                state = state_before_modem_reboot
     except Exception as e:
         log_error(f"Error rebooting modem: {e}")
-
-def send_modem_reboot():
-    log_event("Notifying server of modem restart...")
-    headers = {"Authorization": config["printer_token"]}
-    url = config["url"] + config["modem_restart_url"]
-
-    try:
-        # Use many retries with exponential backoff for up to 5 minutes
-        response = network_client.get(
-            url,
-            headers=headers,
-            max_attempts=15  # With exponential backoff, this covers ~5 minutes
-        )
-        if response.status_code == 200:
-            log_event("Server acknowledged modem reboot.")
-            return True
-        else:
-            log_error(f"Modem reboot notify failed: {response.status_code}")
-            return False
-    except Exception as e:
-        log_error(f"Error notifying server of modem reboot after all retries: {e}")
-        return False
+        state = state_before_modem_reboot
 
 def init_config():
     global config
@@ -761,6 +791,8 @@ def update_led_status():
                 set_led_color(1, 0, 0)  # Red (connection lost)
             case State.CIRCUIT_BREAKER_OPEN:
                 set_led_color(0.2, 0.8, 1)  # Light blue (server down, circuit breaker open)
+            case State.MODEM_REBOOTING:
+                set_led_color(0.8, 0, 1)  # Purple (modem rebooting)
             case State.BOOTING:
                 set_led_color(1, 1, 0)  # Yellow (initializing)
 
@@ -939,15 +971,13 @@ if __name__ == "__main__":
     log_event("Servo initialized")
     init_CUPS()
     log_event("CUPS initialized")
-    
-    if config["reboot_modem"] is True:
-        threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
-        log_event("Modem restart thread started")
     log_event("DEMO PRINTER. Paper and ink level tracking disabled.")
     state = State.IDLE
     while True:
         try:
             # check_supply_levels()
+            # Check for prolonged NO_CONNECTION and trigger modem reboot if needed
+            check_prolonged_no_connection()
             # Check for commands first, then messages
             check_for_new_commands()
             check_for_new_messages()
