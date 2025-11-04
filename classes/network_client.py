@@ -7,6 +7,11 @@ from typing import Optional, Callable, Any
 import logging
 
 
+class CircuitBreakerOpenException(Exception):
+    """Exception raised when circuit breaker is open and rejecting requests."""
+    pass
+
+
 class CircuitState(Enum):
     CLOSED = "closed"  # Normal operation
     OPEN = "open"      # Failing, reject requests
@@ -21,14 +26,27 @@ class CircuitBreaker:
     - CLOSED: Normal operation, requests pass through
     - OPEN: Service is failing, reject requests immediately
     - HALF_OPEN: Testing if service has recovered
+
+    Only opens if the target server is down but internet connectivity exists.
+    If internet is down (modem issue), keeps trying without opening.
     """
 
-    def __init__(self, failure_threshold: int = 5, cooldown: int = 60):
+    def __init__(self, failure_threshold: int = 5, cooldown: int = 60,
+                 connectivity_check_urls: list = None,
+                 on_breaker_open: Optional[Callable] = None,
+                 on_breaker_close: Optional[Callable] = None):
         self.failure_threshold = failure_threshold
         self.cooldown = cooldown
         self.failures = 0
         self.last_failure_time = None
         self.state = CircuitState.CLOSED
+        self.connectivity_check_urls = connectivity_check_urls or [
+            "https://www.google.com",
+            "https://1.1.1.1",  # Cloudflare DNS
+            "https://8.8.8.8"   # Google DNS
+        ]
+        self.on_breaker_open = on_breaker_open
+        self.on_breaker_close = on_breaker_close
 
     def call(self, func: Callable, *args, **kwargs) -> Any:
         """Execute function through circuit breaker"""
@@ -37,7 +55,7 @@ class CircuitBreaker:
                 logging.info("Circuit breaker entering HALF_OPEN state for testing")
                 self.state = CircuitState.HALF_OPEN
             else:
-                raise Exception(f"Circuit breaker is OPEN. Service unavailable. Retry in {int(self.cooldown - (time.time() - self.last_failure_time))}s")
+                raise CircuitBreakerOpenException(f"Circuit breaker is OPEN. Service unavailable. Retry in {int(self.cooldown - (time.time() - self.last_failure_time))}s")
 
         try:
             result = func(*args, **kwargs)
@@ -49,19 +67,63 @@ class CircuitBreaker:
             self.record_failure()
             raise e
 
+    def check_internet_connectivity(self) -> bool:
+        """
+        Check if we have internet connectivity by testing known reliable servers.
+        Returns True if we can reach at least one test server.
+        """
+        for url in self.connectivity_check_urls:
+            try:
+                # Quick HEAD request with short timeout
+                response = requests.head(url, timeout=3)
+                if response.status_code < 500:  # Any response except server error means connectivity exists
+                    logging.info(f"Internet connectivity confirmed via {url}")
+                    return True
+            except Exception:
+                # Try next URL
+                continue
+
+        logging.warning("Internet connectivity check failed - cannot reach any test servers")
+        return False
+
     def record_failure(self):
-        """Record a failure and potentially open the circuit"""
+        """
+        Record a failure and potentially open the circuit.
+        Only opens if internet connectivity exists (meaning the target server is down).
+        If internet is down, keeps circuit closed so we keep trying.
+        """
         self.failures += 1
         self.last_failure_time = time.time()
+
         if self.failures >= self.failure_threshold:
             if self.state != CircuitState.OPEN:
-                logging.warning(f"Circuit breaker OPENING after {self.failures} consecutive failures")
-            self.state = CircuitState.OPEN
+                # Check if we have internet before opening circuit
+                has_internet = self.check_internet_connectivity()
+
+                if has_internet:
+                    logging.warning(
+                        f"Circuit breaker OPENING after {self.failures} consecutive failures. "
+                        f"Internet is up, target server appears down."
+                    )
+                    self.state = CircuitState.OPEN
+                    if self.on_breaker_open:
+                        self.on_breaker_open()
+                else:
+                    logging.warning(
+                        f"Not opening circuit breaker despite {self.failures} failures - "
+                        f"internet connectivity is down (likely modem issue). Will keep retrying."
+                    )
+                    # Don't open the circuit, but reset failure count to avoid log spam
+                    # We'll check again after more failures
+                    self.failures = self.failure_threshold - 1
 
     def reset(self):
         """Reset circuit breaker to closed state"""
+        was_open = self.state == CircuitState.OPEN
         self.failures = 0
         self.state = CircuitState.CLOSED
+        if was_open and self.on_breaker_close:
+            self.on_breaker_close()
 
 
 class NetworkClient:
@@ -88,9 +150,12 @@ class NetworkClient:
                  retry_max_delay: int = 60,
                  circuit_breaker_threshold: int = 5,
                  circuit_breaker_cooldown: int = 60,
+                 connectivity_check_urls: Optional[list] = None,
                  on_connection_weak: Optional[Callable] = None,
                  on_connection_lost: Optional[Callable] = None,
-                 on_connection_restored: Optional[Callable] = None):
+                 on_connection_restored: Optional[Callable] = None,
+                 on_circuit_breaker_open: Optional[Callable] = None,
+                 on_circuit_breaker_close: Optional[Callable] = None):
         """
         Initialize NetworkClient with configuration.
 
@@ -105,9 +170,12 @@ class NetworkClient:
             retry_max_delay: Maximum delay between retries (seconds)
             circuit_breaker_threshold: Failures before opening circuit
             circuit_breaker_cooldown: Cooldown period when circuit is open (seconds)
+            connectivity_check_urls: URLs to check for internet connectivity (defaults to google, cloudflare, google DNS)
             on_connection_weak: Callback to call when first connection failure occurs
             on_connection_lost: Callback to call when connection is completely lost
             on_connection_restored: Callback to call when connection is restored
+            on_circuit_breaker_open: Callback when circuit breaker opens
+            on_circuit_breaker_close: Callback when circuit breaker closes
         """
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
@@ -142,7 +210,10 @@ class NetworkClient:
         # Circuit breaker for each client instance
         self.circuit_breaker = CircuitBreaker(
             failure_threshold=circuit_breaker_threshold,
-            cooldown=circuit_breaker_cooldown
+            cooldown=circuit_breaker_cooldown,
+            connectivity_check_urls=connectivity_check_urls,
+            on_breaker_open=on_circuit_breaker_open,
+            on_breaker_close=on_circuit_breaker_close
         )
 
     def _exponential_backoff_with_jitter(self, attempt: int) -> float:
@@ -220,6 +291,10 @@ class NetworkClient:
                         self.on_connection_restored()
 
                 return response
+
+            except CircuitBreakerOpenException:
+                # Circuit breaker is open - don't retry, let it handle its own cooldown
+                raise
 
             except Exception as e:
                 last_exception = e

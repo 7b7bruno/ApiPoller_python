@@ -22,7 +22,7 @@ Values should be between 0.0 (off) and 1.0 (full brightness)
 
 import sys
 import time
-from gpiozero import PWMLED
+from gpiozero import PWMLED #type:ignore
 
 # Default configuration - same as ApiPoller.py
 DEFAULT_CONFIG = {

@@ -157,6 +157,7 @@ class State(enum.Enum):
     WAITING_FOR_CUPS = "Waiting for CUPS to start"
     CONNECTION_WEAK = "Connection weak"
     NO_CONNECTION = "No connection"
+    CIRCUIT_BREAKER_OPEN = "Server down (circuit breaker open)"
 
 state = State.BOOTING
 state_before_connection_issue = None
@@ -182,7 +183,7 @@ def on_network_connection_weak():
     """Callback when network connection has first failure."""
     global state, state_before_connection_issue
     # Only save previous state if we're not already in a connection issue state
-    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION]:
+    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
         state_before_connection_issue = state
     state = State.CONNECTION_WEAK
 
@@ -190,7 +191,7 @@ def on_network_connection_lost():
     """Callback when network connection is completely lost (all retries exhausted)."""
     global state, state_before_connection_issue
     # Only save previous state if we're not already in a connection issue state
-    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION]:
+    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
         state_before_connection_issue = state
     state = State.NO_CONNECTION
 
@@ -198,7 +199,27 @@ def on_network_connection_restored():
     """Callback when network connection is restored."""
     global state, state_before_connection_issue
     # Restore to previous state if we were in a connection issue state
-    if state in [State.CONNECTION_WEAK, State.NO_CONNECTION]:
+    if state in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+        if state_before_connection_issue is not None:
+            state = state_before_connection_issue
+            state_before_connection_issue = None
+        else:
+            # Fallback to IDLE if we don't have a previous state
+            state = State.IDLE
+
+def on_circuit_breaker_open():
+    """Callback when circuit breaker opens (server confirmed down, internet is up)."""
+    global state, state_before_connection_issue
+    # Only save previous state if we're not already in a connection issue state
+    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+        state_before_connection_issue = state
+    state = State.CIRCUIT_BREAKER_OPEN
+
+def on_circuit_breaker_close():
+    """Callback when circuit breaker closes (server recovered)."""
+    global state, state_before_connection_issue
+    # Restore to previous state if we're in circuit breaker open state
+    if state == State.CIRCUIT_BREAKER_OPEN:
         if state_before_connection_issue is not None:
             state = state_before_connection_issue
             state_before_connection_issue = None
@@ -223,7 +244,9 @@ def init_network_client():
         circuit_breaker_cooldown=config["circuit_breaker_cooldown"],
         on_connection_weak=on_network_connection_weak,
         on_connection_lost=on_network_connection_lost,
-        on_connection_restored=on_network_connection_restored
+        on_connection_restored=on_network_connection_restored,
+        on_circuit_breaker_open=on_circuit_breaker_open,
+        on_circuit_breaker_close=on_circuit_breaker_close
     )
 
     recovery_manager = RecoveryManager(
@@ -736,6 +759,8 @@ def update_led_status():
                 set_led_color(1, 0.3, 0)  # Orange (network issues, retrying)
             case State.NO_CONNECTION:
                 set_led_color(1, 0, 0)  # Red (connection lost)
+            case State.CIRCUIT_BREAKER_OPEN:
+                set_led_color(0.2, 0.8, 1)  # Light blue (server down, circuit breaker open)
             case State.BOOTING:
                 set_led_color(1, 1, 0)  # Yellow (initializing)
 
@@ -780,15 +805,6 @@ def init_GPIO():
     global button
     button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
     # button.when_pressed = _on_door_open
-
-def init_command_thread():
-    command_thread = threading.Thread(target=pollCommands, daemon=True)
-    command_thread.start()
-
-def pollCommands():
-    while True:
-        check_for_new_commands()
-        time.sleep(config["command_check_interval"])
 
 def check_for_new_commands():
     global last_successful_command_request
@@ -927,13 +943,13 @@ if __name__ == "__main__":
     if config["reboot_modem"] is True:
         threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
         log_event("Modem restart thread started")
-    init_command_thread()
-    log_event("Command thread started")
     log_event("DEMO PRINTER. Paper and ink level tracking disabled.")
     state = State.IDLE
     while True:
         try:
             # check_supply_levels()
+            # Check for commands first, then messages
+            check_for_new_commands()
             check_for_new_messages()
             time.sleep(config["check_interval"])
         except Exception as e:
