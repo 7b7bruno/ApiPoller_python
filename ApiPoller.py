@@ -544,7 +544,6 @@ def save_image(config, response, message_id):
 def ack_message(message_id):
     global state
     log_event(f"Acknowledging message ID: {message_id}")
-    state = State.ACKNOWLEDGING
 
     def try_ack():
         """Try to send acknowledgment"""
