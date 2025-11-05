@@ -970,7 +970,6 @@ if __name__ == "__main__":
     log_event("Servo initialized")
     init_CUPS()
     log_event("CUPS initialized")
-    log_event("DEMO PRINTER. Paper and ink level tracking disabled.")
     state = State.IDLE
     while True:
         try:
