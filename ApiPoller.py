@@ -926,7 +926,7 @@ def flagDown():
 
 def init_CUPS():
     global cupsConn, state
-    log_event(f"Waiting {config["initial_delay"]}s before connecting to cups")
+    log_event(f"Waiting {config['initial_delay']}s before connecting to cups")
     state = State.WAITING_FOR_CUPS
     time.sleep(config["initial_delay"])
     start = time.time()
