@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image
 import subprocess
 import threading
-from gpiozero import AngularServo, Button, OutputDevice # type: ignore
+from gpiozero import AngularServo, Button, PWMLED # type: ignore
 from huawei_lte_api.Connection import Connection  # type: ignore
 from huawei_lte_api.Client import Client  # type: ignore
 from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
@@ -17,6 +17,8 @@ import traceback
 import enum
 import math
 from classes.huawei_modem_reader import HuaweiModemReader
+from classes.network_client import NetworkClient
+from classes.recovery_manager import RecoveryManager
 
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
@@ -67,7 +69,18 @@ DEFAULT_CONFIG = {
     "flag_down_angle": 180,
     "flag_up_angle": 0,
     "rise_delay": 48,
-    "print_tracking_interval": 2
+    "print_tracking_interval": 2,
+    # Network client configuration
+    "retry_max_attempts": 3,
+    "retry_critical_attempts": 10,
+    "retry_backoff_factor": 2.0,
+    "retry_max_delay": 60,
+    "connection_pool_size": 10,
+    "connect_timeout": 10,
+    "read_timeout": 30,
+    "keepalive_timeout": 60,
+    "circuit_breaker_threshold": 5,
+    "circuit_breaker_cooldown": 60
 }
 
 class ConfigManager:
@@ -103,7 +116,7 @@ class ConfigManager:
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
 
-VERSION = "V0.2.6"
+VERSION = "V0.2.7"
 
 last_successful_request = time.time()
 last_successful_command_request = time.time()
@@ -127,6 +140,10 @@ refill_type = None
 # CUPS connection
 cupsConn = None
 
+# Network client and recovery manager
+network_client = None
+recovery_manager = None
+
 # State enum
 class State(enum.Enum):
     BOOTING = "Booting"
@@ -138,9 +155,15 @@ class State(enum.Enum):
     OUT_OF_INK = "Out of ink"
     OUT_OF_INK_AND_PAPER = "Out of ink and paper"
     WAITING_FOR_CUPS = "Waiting for CUPS to start"
+    CONNECTION_WEAK = "Connection weak"
     NO_CONNECTION = "No connection"
+    CIRCUIT_BREAKER_OPEN = "Server down (circuit breaker open)"
+    MODEM_REBOOTING = "Modem rebooting"
 
 state = State.BOOTING
+state_before_connection_issue = None
+no_connection_since = None  # Timestamp when NO_CONNECTION state was entered
+last_modem_reboot_attempt = None  # Timestamp of last modem reboot attempt
 
 # Speed of last download
 last_download_speed = None
@@ -159,124 +182,149 @@ def log_error(message):
     print(f"{timestamp} - {message}")
     logging.error(f"{timestamp} - {message}")
 
-def modem_reboot_scheduler():
-    while True:
-        time.sleep(config["modem_restart_trigger_interval"])
+def on_network_connection_weak():
+    """Callback when network connection has first failure."""
+    global state, state_before_connection_issue
+    # Only save previous state if we're not already in a connection issue state
+    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+        state_before_connection_issue = state
+    state = State.CONNECTION_WEAK
+
+def on_network_connection_lost():
+    """Callback when network connection is completely lost (all retries exhausted)."""
+    global state, state_before_connection_issue, no_connection_since
+    # Only save previous state if we're not already in a connection issue state
+    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+        state_before_connection_issue = state
+    # Track when we entered NO_CONNECTION state
+    if no_connection_since is None:
+        no_connection_since = time.time()
+        log_event("Entered NO_CONNECTION state - modem reboot will trigger if this persists for 60+ seconds")
+    state = State.NO_CONNECTION
+
+def on_network_connection_restored():
+    """Callback when network connection is restored."""
+    global state, state_before_connection_issue, no_connection_since
+    # Clear NO_CONNECTION timer
+    if no_connection_since is not None:
+        duration = time.time() - no_connection_since
+        log_event(f"Connection restored after {duration:.1f} seconds")
+        no_connection_since = None
+    # Restore to previous state if we were in a connection issue state
+    if state in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+        if state_before_connection_issue is not None:
+            state = state_before_connection_issue
+            state_before_connection_issue = None
+        else:
+            # Fallback to IDLE if we don't have a previous state
+            state = State.IDLE
+
+def on_circuit_breaker_open():
+    """Callback when circuit breaker opens (server confirmed down, internet is up)."""
+    global state, state_before_connection_issue
+    # Only save previous state if we're not already in a connection issue state
+    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+        state_before_connection_issue = state
+    state = State.CIRCUIT_BREAKER_OPEN
+
+def on_circuit_breaker_close():
+    """Callback when circuit breaker closes (server recovered)."""
+    global state, state_before_connection_issue
+    # Restore to previous state if we're in circuit breaker open state
+    if state == State.CIRCUIT_BREAKER_OPEN:
+        if state_before_connection_issue is not None:
+            state = state_before_connection_issue
+            state_before_connection_issue = None
+        else:
+            # Fallback to IDLE if we don't have a previous state
+            state = State.IDLE
+
+def init_network_client():
+    """Initialize network client and recovery manager with configuration."""
+    global network_client, recovery_manager
+
+    network_client = NetworkClient(
+        pool_connections=config["connection_pool_size"],
+        pool_maxsize=config["connection_pool_size"] * 2,
+        keepalive_timeout=config["keepalive_timeout"],
+        connect_timeout=config["connect_timeout"],
+        read_timeout=config["read_timeout"],
+        retry_max_attempts=config["retry_max_attempts"],
+        retry_backoff_factor=config["retry_backoff_factor"],
+        retry_max_delay=config["retry_max_delay"],
+        circuit_breaker_threshold=config["circuit_breaker_threshold"],
+        circuit_breaker_cooldown=config["circuit_breaker_cooldown"],
+        on_connection_weak=on_network_connection_weak,
+        on_connection_lost=on_network_connection_lost,
+        on_connection_restored=on_network_connection_restored,
+        on_circuit_breaker_open=on_circuit_breaker_open,
+        on_circuit_breaker_close=on_circuit_breaker_close
+    )
+
+    recovery_manager = RecoveryManager(
+        modem_reboot_callback=reboot_modem
+    )
+
+    log_event("Network client initialized with keepalive and exponential backoff")
+
+def check_prolonged_no_connection():
+    """Check if we've been in NO_CONNECTION state too long and trigger modem reboot."""
+    global no_connection_since, last_modem_reboot_attempt
+
+    # Don't trigger if modem is already rebooting
+    if state == State.MODEM_REBOOTING:
+        return
+
+    # Only check if we're in NO_CONNECTION state
+    if state != State.NO_CONNECTION or no_connection_since is None:
+        return
+
+    # Calculate how long we've been disconnected
+    disconnected_duration = time.time() - no_connection_since
+
+    # Check if we've been disconnected for more than 60 seconds
+    if disconnected_duration > 60:
+        # Check cooldown - don't reboot more than once per 5 minutes
+        if last_modem_reboot_attempt is not None:
+            time_since_last_reboot = time.time() - last_modem_reboot_attempt
+            if time_since_last_reboot < 300:  # 5 minutes cooldown
+                log_event(f"NO_CONNECTION for {disconnected_duration:.0f}s, but modem was rebooted {time_since_last_reboot:.0f}s ago. Waiting...")
+                return
+
+        log_event(f"NO_CONNECTION persisted for {disconnected_duration:.0f}s - triggering modem reboot")
+        last_modem_reboot_attempt = time.time()
+        no_connection_since = None  # Reset timer to prevent immediate re-trigger
         reboot_modem()
 
 def reboot_modem():
+    global state, state_before_connection_issue
+
+    # Save current state before modem reboot
+    state_before_modem_reboot = state
+
     try:
         log_event("Rebooting modem...")
+        state = State.MODEM_REBOOTING
+
         with Connection(config["modem_gateway_url"]) as connection:
             client = Client(connection)
             if client.device.reboot() == ResponseEnum.OK.value:
                 log_event("Modem reboot requested successfully.")
-                time.sleep(30)
-                send_modem_reboot()
+
+                # Wait for modem to fully boot up before resuming operations
+                modem_boot_time = config["modem_boot_time"]
+                log_event(f"Waiting {modem_boot_time}s for modem to boot...")
+                time.sleep(modem_boot_time)
+                log_event("Modem should be ready now")
+
+                # Restore previous state
+                state = state_before_modem_reboot
             else:
                 log_error("Modem reboot failed.")
+                state = state_before_modem_reboot
     except Exception as e:
         log_error(f"Error rebooting modem: {e}")
-
-def send_modem_reboot():
-    log_event("Notifying server of modem restart...")
-    headers = {"Authorization": config["printer_token"]}
-    url = config["url"] + config["modem_restart_url"]
-    
-    timeout_time = time.time() + config["modem_restart_notify_timeout_interval"]  # Try for up to 5 minutes (300 seconds)
-
-    while time.time() < timeout_time:
-        try:
-            response = requests.get(url, headers=headers, timeout=config["request_timeout_interval"])
-            if response.status_code == 200:
-                log_event("Server acknowledged modem reboot.")
-                return True
-            else:
-                log_error(f"Modem reboot notify failed: {response.status_code}")
-        except Exception as e:
-            log_error(f"Error notifying server of modem reboot: {e}")
-        
-        time.sleep(10)  # Wait 10 seconds before retrying
-
-def load_status():
-    """Load printer status from file, create default if missing."""
-    if not os.path.exists(STATUS_FILE):
-        status = {"paper": config["paper_capacity"], "ink": config["ink_capacity"]}
-        save_status(status)
-    else:
-        with open(STATUS_FILE, 'r') as f:
-            status = json.load(f)
-    return status
-
-def save_status(status):
-    """Save printer status to file."""
-    with open(STATUS_FILE, 'w') as f:
-        json.dump(status, f, indent=4)
-
-def check_supply_levels():
-    """Check if ink or paper is empty and stop operation if needed."""
-    global waiting_for_refill, refill_type
-    status = load_status()
-    if status["paper"] == 0 and status["ink"] > 0:
-        waiting_for_refill = True
-        refill_type = "paper"
-        set_led_color(1, 1, 0)     # Yellow
-        log_event("Out of paper — waiting for refill")
-    elif status["ink"] == 0:
-        waiting_for_refill = True
-        refill_type = "ink" if status["paper"] > 0 else "both"
-        set_led_color(1, 0, 0)     # Red
-        log_event("Out of ink — waiting for refill")
-    return status
-
-def check_for_refill():
-    """Poll API endpoint to check if printer has been refilled."""
-    try:
-        headers = {"Authorization": config["printer_token"]}
-        response = requests.get(config["url"] + config["refill_url"], timeout=config["request_timeout_interval"], headers=headers)
-        if response.status_code == 200:
-            refill_data = response.json()
-            refilled = False
-            status = load_status()
-
-            if refill_data.get("paper_refilled", False):
-                log_event("Paper refilled")
-                status["paper"] = config["paper_capacity"]
-                refilled = True
-
-            if refill_data.get("ink_refilled", False):
-                log_event("Ink refilled")
-                status["ink"] = config["ink_capacity"]
-                refilled = True
-
-            if refilled:
-                save_status(status)
-
-            return refilled
-        
-    except requests.exceptions.RequestException as e:
-        log_error(f"Error checking refill status: {e}")
-        
-    return False
-
-def _perform_refill():
-    global waiting_for_refill, refill_type
-    status = load_status()
-
-    if refill_type in ("paper", "both"):
-        status["paper"] = config["paper_capacity"]
-        log_event("Paper manually refilled.")
-
-    if refill_type in ("ink", "both"):
-        status["ink"] = config["ink_capacity"]
-        status["paper"] = config["paper_capacity"]
-        log_event("Ink manually refilled.")
-
-    save_status(status)
-
-    waiting_for_refill = False
-    set_led_color(0, 1, 0)         # Green
-    log_event("Resumed normal operation after manual refill.")
+        state = state_before_modem_reboot
 
 def init_config():
     global config
@@ -306,34 +354,30 @@ def update_config():
     else:
         headers = getHeaders()
         log_event("Using full headers")
-    retries = 15
-    while retries > 0:
-        try:
-            response = requests.get(config["url"] + config["config_url"], headers=headers, timeout=config["request_timeout_interval"])
-            if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
-                log_event("Config retrieved")
-                data = response.json()
-                if(check_config(data)):
-                    with open(CONFIG_FILE, "w") as f:
-                        json.dump(data, f, indent=4)
-                    # Server config overrides all, then defaults fill in any missing fields
-                    config.update_from_dict(data)
-                    log_event("Config updated")
-                else:
-                    log_error("Pulled config doesn't pass integrity check, not using It.")
-            elif response.status_code == 201:
-                # log_event("No new messages found")
-                print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
+
+    try:
+        response = network_client.get(
+            config["url"] + config["config_url"],
+            headers=headers,
+            max_attempts=5  # Use more attempts for config fetch
+        )
+        if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
+            log_event("Config retrieved")
+            data = response.json()
+            if check_config(data):
+                with open(CONFIG_FILE, "w") as f:
+                    json.dump(data, f, indent=4)
+                # Server config overrides all, then defaults fill in any missing fields
+                config.update_from_dict(data)
+                log_event("Config updated")
             else:
-                log_error(f"Error: {response.status_code}")
-                retries -= 1
-            state = State.BOOTING
-            break
-        except requests.exceptions.RequestException as e:
-            log_error(f"Connection lost: {e}. Retrying in 1s...")
-            state = State.NO_CONNECTION
-            time.sleep(1)
-            retries -= 1
+                log_error("Pulled config doesn't pass integrity check, not using it.")
+        else:
+            log_error(f"Error: {response.status_code}")
+        state = State.BOOTING
+    except Exception as e:
+        log_error(f"Failed to update config after retries: {e}")
+        state = State.NO_CONNECTION
 
 def check_config(data):
     if not isinstance(data, dict):
@@ -381,24 +425,26 @@ def check_for_new_messages():
     global last_successful_request, state
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
 
-    while True:
-        try:
-            response = requests.get(config["url"] + config["request_url"], headers=getHeaders(), timeout=config["request_timeout_interval"])
-            if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
-                log_event("New message found")
-                handle_message(config, response.json())
-            elif response.status_code == 201:
-                # log_event("No new messages found")
-                print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
-            else:
-                log_error(f"Error: {response.status_code}")
-            last_successful_request = time.time()
-            if state is not State.MESSAGE_RECEIVED:
-                state = State.IDLE
-            break
-        except requests.exceptions.RequestException as e:
-            request_timeout_interval = config["request_timeout_interval"]
-            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
+    try:
+        response = network_client.get(
+            config["url"] + config["request_url"],
+            headers=getHeaders(),
+            max_attempts=5  # More attempts for polling endpoint
+        )
+        if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
+            log_event("New message found")
+            handle_message(config, response.json())
+        elif response.status_code == 201:
+            # log_event("No new messages found")
+            print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
+        else:
+            log_error(f"Error: {response.status_code}")
+        last_successful_request = time.time()
+        if state is not State.MESSAGE_RECEIVED:
+            state = State.IDLE
+    except Exception as e:
+        log_error(f"Failed to check for new messages: {e}")
+        state = State.NO_CONNECTION
 
 
 
@@ -445,24 +491,25 @@ def handle_message(config, data):
 
 def get_image(config, message_id):
     log_event("Getting image...")
-    while True:
-        try:
-            response = requests.get(f"{config['url']}{config['image_url']}/{message_id}", headers=getHeaders(), stream=True, timeout=config["request_timeout_interval"])
-            if response.status_code == 200 and 'image' in response.headers.get('Content-Type', ''):
-                log_event("Image pulled.")
-                image_path = save_image(config, response, message_id)
-                return image_path
-            elif response.status_code == 201:
-                log_event("No new messages found")
-                return None
-            else:
-                log_error(f"Error: {response.status_code}")
-                return None
-            break
-        except requests.exceptions.RequestException as e:
-            request_timeout_interval = config["request_timeout_interval"]
-            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
-            time.sleep(5)
+    try:
+        response = network_client.get_streaming(
+            f"{config['url']}{config['image_url']}/{message_id}",
+            headers=getHeaders(),
+            max_attempts=3  # Fewer attempts for large downloads
+        )
+        if response.status_code == 200 and 'image' in response.headers.get('Content-Type', ''):
+            log_event("Image pulled.")
+            image_path = save_image(config, response, message_id)
+            return image_path
+        elif response.status_code == 201:
+            log_event("No new messages found")
+            return None
+        else:
+            log_error(f"Error: {response.status_code}")
+            return None
+    except Exception as e:
+        log_error(f"Failed to get image after retries: {e}")
+        return None
 
 def save_image(config, response, message_id):
     global last_download_speed
@@ -495,23 +542,53 @@ def save_image(config, response, message_id):
         return None
 
 def ack_message(message_id):
+    global state
     log_event(f"Acknowledging message ID: {message_id}")
-    while True:
+
+    def try_ack():
+        """Try to send acknowledgment"""
         try:
-            response = requests.post(f"{config['url']}{config['ack_url']}?message_id={message_id}", headers=getHeaders(), timeout=config["request_timeout_interval"])
+            response = network_client.post(
+                f"{config['url']}{config['ack_url']}?message_id={message_id}",
+                headers=getHeaders(),
+                max_attempts=config["retry_critical_attempts"]  # Use critical retry count
+            )
             log_event(response.text)
-            break
-        except requests.exceptions.RequestException as e:
-            request_timeout_interval = config["request_timeout_interval"]
-            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
-            time.sleep(5)
+            return True
+        except Exception as e:
+            log_error(f"Failed to acknowledge message: {e}")
+            return False
+
+    # Try to send ack
+    success = try_ack()
+
+    if not success:
+        # Critical failure - escalate recovery
+        log_error(f"CRITICAL: Failed to acknowledge message {message_id} after all retries")
+
+        ack_data = {
+            'url': f"{config['url']}{config['ack_url']}?message_id={message_id}",
+            'message_id': message_id
+        }
+
+        # Use recovery manager to handle escalation
+        recovery_manager.handle_critical_failure(
+            operation_name="ack_message",
+            ack_id=str(message_id),
+            ack_data=ack_data,
+            retry_callback=try_ack
+        )
 
 def send_status():
     log_event(f"Sending printer status - {state} - to server.")
     try:
-        response = requests.get(f"{config['url']}{config['auth_check_url']}", headers=getHeaders(), timeout=config["request_timeout_interval"])
+        response = network_client.get(
+            f"{config['url']}{config['auth_check_url']}",
+            headers=getHeaders(),
+            max_attempts=3
+        )
         log_event(response.text)
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         log_error(f"Failed to send printer status to server: {e}")
 
 def print_image(image_path):
@@ -680,20 +757,11 @@ def set_servo_angle(angle):
             time.sleep(1)
             servo.detach()
 
-# Function to control LED color
+# Function to control LED color with PWM (0.0-1.0 for each channel)
 def set_led_color(red, green, blue):
-    if red:
-        led_red.on()
-    else:
-        led_red.off()
-    if green:
-        led_green.on()
-    else:
-        led_green.off()
-    if blue:
-        led_blue.on()
-    else:
-        led_blue.off()
+    led_red.value = red
+    led_green.value = green
+    led_blue.value = blue
 
 # Function to update LED status based on flag state
 def update_led_status():
@@ -701,42 +769,39 @@ def update_led_status():
     while True:
         match state:
             case State.IDLE:
-                set_led_color(0, 1, 0)
+                set_led_color(0, 1, 0)  # Green
             case State.INCOMING_TRANSMISSION:
-                set_led_color(0, 0, 1)
+                set_led_color(0, 0, 1)  # Blue
             case State.MESSAGE_RECEIVED:
-                set_led_color(0, 1, 1)
+                set_led_color(0, 1, 1)  # Cyan
             case State.ACKNOWLEDGING:
-                set_led_color(1, 1, 1)
+                set_led_color(1, 1, 1)  # White
             case State.OUT_OF_INK:
-                set_led_color(1, 0, 0)
+                set_led_color(1, 0, 0)  # Red
             case State.OUT_OF_PAPER:
-                set_led_color(1, 0, 0)
+                set_led_color(1, 0, 0)  # Red
             case State.OUT_OF_INK_AND_PAPER:
-                set_led_color(1, 0, 0)
+                set_led_color(1, 0, 0)  # Red
             case State.WAITING_FOR_CUPS:
-                set_led_color(1, 0, 1)
+                set_led_color(1, 0, 1)  # Magenta
+            case State.CONNECTION_WEAK:
+                set_led_color(1, 0.3, 0)  # Orange (network issues, retrying)
             case State.NO_CONNECTION:
-                set_led_color(1, 0, 0)
+                set_led_color(1, 0, 0)  # Red (connection lost)
+            case State.CIRCUIT_BREAKER_OPEN:
+                set_led_color(0.2, 0.8, 1)  # Light blue (server down, circuit breaker open)
+            case State.MODEM_REBOOTING:
+                set_led_color(0.8, 0, 1)  # Purple (modem rebooting)
             case State.BOOTING:
-                set_led_color(1, 1, 0)
+                set_led_color(1, 1, 0)  # Yellow (initializing)
 
         time.sleep(0.5)
 
-# Function to control LED color
+# Function to control paper LED color with PWM (0.0-1.0 for each channel)
 def set_paper_led_color(red, green, blue):
-    if red:
-        paper_led_red.on()
-    else:
-        paper_led_red.off()
-    if green:
-        paper_led_green.on()
-    else:
-        paper_led_green.off()
-    if blue:
-        paper_led_blue.on()
-    else:
-        paper_led_blue.off()
+    paper_led_red.value = red
+    paper_led_green.value = green
+    paper_led_blue.value = blue
 
 # Function to update LED status based on flag state
 def update_paper_led_status():
@@ -746,9 +811,9 @@ def update_paper_led_status():
 
 def init_led():
     global led_red, led_green, led_blue
-    led_red = OutputDevice(config["led_pins"]["red"])
-    led_green = OutputDevice(config["led_pins"]["green"])
-    led_blue = OutputDevice(config["led_pins"]["blue"])
+    led_red = PWMLED(config["led_pins"]["red"])
+    led_green = PWMLED(config["led_pins"]["green"])
+    led_blue = PWMLED(config["led_pins"]["blue"])
 
     led_thread = threading.Thread(target=update_led_status, daemon=True)
     led_thread.start()
@@ -756,9 +821,9 @@ def init_led():
 def init_paper_led():
     global paper_led_red, paper_led_green, paper_led_blue
     if config["paper_led"] == True:
-        paper_led_red = OutputDevice(config["paper_led_pins"]["red"])
-        paper_led_green = OutputDevice(config["paper_led_pins"]["green"])
-        paper_led_blue = OutputDevice(config["paper_led_pins"]["blue"])
+        paper_led_red = PWMLED(config["paper_led_pins"]["red"])
+        paper_led_green = PWMLED(config["paper_led_pins"]["green"])
+        paper_led_blue = PWMLED(config["paper_led_pins"]["blue"])
 
         paper_led_thread = threading.Thread(target=update_paper_led_status, daemon=True)
         paper_led_thread.start()
@@ -772,33 +837,25 @@ def init_GPIO():
     button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
     # button.when_pressed = _on_door_open
 
-def init_command_thread():
-    command_thread = threading.Thread(target=pollCommands, daemon=True)
-    command_thread.start()
-
-def pollCommands():
-    while True:
-        check_for_new_commands()
-        time.sleep(config["command_check_interval"])
-
 def check_for_new_commands():
     global last_successful_command_request
-    while True:
-        try:
-            response = requests.get(config["url"] + config["command_url"], headers=getHeaders(), timeout=config["request_timeout_interval"])
-            if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
-                log_event("New command found")
-                dispatchCommand(response.json())
-            # elif response.status_code == 201:
-            #     print("No new commands found")
-            #     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
-            elif response.status_code != 201:
-                log_error(f"Command check error: {response.status_code}")
-            last_successful_command_request = time.time()
-            break
-        except requests.exceptions.RequestException as e:
-            request_timeout_interval = config["request_timeout_interval"]
-            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
+    try:
+        response = network_client.get(
+            config["url"] + config["command_url"],
+            headers=getHeaders(),
+            max_attempts=5
+        )
+        if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
+            log_event("New command found")
+            dispatchCommand(response.json())
+        # elif response.status_code == 201:
+        #     print("No new commands found")
+        #     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] No new messages found")
+        elif response.status_code != 201:
+            log_error(f"Command check error: {response.status_code}")
+        last_successful_command_request = time.time()
+    except Exception as e:
+        log_error(f"Failed to check for new commands: {e}")
        
 def dispatchCommand(data):
     command_id = data.get("command_id")
@@ -821,15 +878,40 @@ def dispatchCommand(data):
 
 def ackCommand(command_id):
     log_event(f"Acknowledging command. ID: {command_id}")
-    while True:
+
+    def try_ack():
+        """Try to send command acknowledgment"""
         try:
-            response = requests.post(f"{config['url']}{config['command_ack_url']}?command_id={command_id}", headers=getHeaders(), timeout=config["request_timeout_interval"])
+            response = network_client.post(
+                f"{config['url']}{config['command_ack_url']}?command_id={command_id}",
+                headers=getHeaders(),
+                max_attempts=config["retry_critical_attempts"]  # Use critical retry count
+            )
             log_event(response.text)
-            break
-        except requests.exceptions.RequestException as e:
-            request_timeout_interval = config["request_timeout_interval"]
-            log_error(f"Connection lost: {e}. Retrying in {request_timeout_interval} seconds...")
-            time.sleep(5)
+            return True
+        except Exception as e:
+            log_error(f"Failed to acknowledge command: {e}")
+            return False
+
+    # Try to send ack
+    success = try_ack()
+
+    if not success:
+        # Critical failure - escalate recovery
+        log_error(f"CRITICAL: Failed to acknowledge command {command_id} after all retries")
+
+        ack_data = {
+            'url': f"{config['url']}{config['command_ack_url']}?command_id={command_id}",
+            'command_id': command_id
+        }
+
+        # Use recovery manager to handle escalation
+        recovery_manager.handle_critical_failure(
+            operation_name="ackCommand",
+            ack_id=str(command_id),
+            ack_data=ack_data,
+            retry_callback=try_ack
+        )
 
 def reboot():
     command = ["sudo", "reboot"]
@@ -875,6 +957,8 @@ if __name__ == "__main__":
     log_event(f"GPK {VERSION} started")
     init_config()
     log_event("conf loaded from file")
+    init_network_client()
+    log_event("Network client initialized")
     init_GPIO()
     log_event("GPIO initialized")
     init_led()
@@ -886,17 +970,15 @@ if __name__ == "__main__":
     log_event("Servo initialized")
     init_CUPS()
     log_event("CUPS initialized")
-    
-    if config["reboot_modem"] is True:
-        threading.Thread(target=modem_reboot_scheduler, daemon=True).start()
-        log_event("Modem restart thread started")
-    init_command_thread()
-    log_event("Command thread started")
     log_event("DEMO PRINTER. Paper and ink level tracking disabled.")
     state = State.IDLE
     while True:
         try:
             # check_supply_levels()
+            # Check for prolonged NO_CONNECTION and trigger modem reboot if needed
+            check_prolonged_no_connection()
+            # Check for commands first, then messages
+            check_for_new_commands()
             check_for_new_messages()
             time.sleep(config["check_interval"])
         except Exception as e:
