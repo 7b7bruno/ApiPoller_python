@@ -7,17 +7,23 @@ approach as ApiPoller.py. It uses PWMLED for full RGB color control.
 
 Usage:
     Interactive mode:
-        python led_test.py
+        python rgb.py
 
     Command-line mode:
-        python led_test.py <red> <green> <blue>
-        Example: python led_test.py 1 0.3 0  (orange)
+        python rgb.py <red> <green> <blue>
+        Example: python rgb.py 1 0.3 0  (orange)
 
     Preset colors:
-        python led_test.py --preset <color_name>
-        Example: python led_test.py --preset orange
+        python rgb.py --preset <color_name>
+        Example: python rgb.py --preset orange
+
+    Blink patterns:
+        python rgb.py --blink <pattern> [interval]
+        Example: python rgb.py --blink out_of_paper
+        Example: python rgb.py --blink out_of_ink 0.5
 
 Values should be between 0.0 (off) and 1.0 (full brightness)
+Interval is in seconds (default: 1.0)
 """
 
 import sys
@@ -71,6 +77,13 @@ PRESET_COLORS = {
     "off": (0, 0, 0)
 }
 
+# Blink patterns - each pattern is a tuple of two RGB colors
+BLINK_PATTERNS = {
+    "out_of_paper": [(1, 0, 0), (1, 1, 0)],      # Red/Yellow
+    "out_of_ink": [(1, 0, 0), (0, 0, 1)],        # Red/Blue
+    "out_of_both": [(1, 0, 0), (1, 0.2, 0.5)],   # Red/Pink
+}
+
 
 class LEDTester:
     """LED testing utility using PWMLED."""
@@ -106,6 +119,57 @@ class LEDTester:
 
         print(f"Color set to: R={red:.2f}, G={green:.2f}, B={blue:.2f}")
 
+    def blink(self, pattern_name, interval=1.0, duration=None):
+        """
+        Blink between two colors in a pattern.
+
+        Args:
+            pattern_name: Name of the blink pattern from BLINK_PATTERNS
+            interval: Seconds between color changes (default: 1.0)
+            duration: Total blink duration in seconds, or None for infinite
+        """
+        if pattern_name not in BLINK_PATTERNS:
+            print(f"Error: Unknown blink pattern '{pattern_name}'")
+            print(f"Available patterns: {', '.join(BLINK_PATTERNS.keys())}")
+            return
+
+        colors = BLINK_PATTERNS[pattern_name]
+        color1, color2 = colors[0], colors[1]
+
+        print(f"\nBlinking pattern '{pattern_name}':")
+        print(f"  Color 1: R={color1[0]:.1f}, G={color1[1]:.1f}, B={color1[2]:.1f}")
+        print(f"  Color 2: R={color2[0]:.1f}, G={color2[1]:.1f}, B={color2[2]:.1f}")
+        print(f"  Interval: {interval}s")
+        if duration:
+            print(f"  Duration: {duration}s")
+        else:
+            print("  Duration: Infinite (press Ctrl+C to stop)")
+        print()
+
+        start_time = time.time()
+        try:
+            while True:
+                # Calculate which color to show based on time
+                phase = int(time.time() / interval) % 2
+
+                if phase == 0:
+                    self.led_red.value, self.led_green.value, self.led_blue.value = color1
+                else:
+                    self.led_red.value, self.led_green.value, self.led_blue.value = color2
+
+                # Check if duration has elapsed
+                if duration and (time.time() - start_time) >= duration:
+                    print(f"\nBlink duration of {duration}s completed")
+                    break
+
+                time.sleep(0.1)  # Small sleep to prevent CPU spinning
+
+        except KeyboardInterrupt:
+            print("\n\nBlinking stopped")
+        finally:
+            # Turn off LED
+            self.set_color(0, 0, 0)
+
     def show_presets(self):
         """Display available preset colors."""
         print("\nAvailable preset colors:")
@@ -118,15 +182,18 @@ class LEDTester:
         print("LED Color Testing - Interactive Mode")
         print("="*60)
         print("\nCommands:")
-        print("  <r> <g> <b>  - Set RGB values (0.0-1.0)")
-        print("  preset <name> - Use a preset color")
-        print("  list         - Show available presets")
-        print("  off          - Turn off LEDs")
-        print("  quit         - Exit")
+        print("  <r> <g> <b>     - Set RGB values (0.0-1.0)")
+        print("  preset <name>   - Use a preset color")
+        print("  blink <pattern> [interval] - Blink pattern (Ctrl+C to stop)")
+        print("  list            - Show available presets")
+        print("  patterns        - Show available blink patterns")
+        print("  off             - Turn off LEDs")
+        print("  quit            - Exit")
         print("\nExamples:")
-        print("  1 0.3 0      - Orange")
-        print("  preset orange - Orange (using preset)")
-        print("  0.5 0 1      - Purple")
+        print("  1 0.3 0           - Orange")
+        print("  preset orange     - Orange (using preset)")
+        print("  blink out_of_paper - Red/Yellow blinking")
+        print("  blink out_of_ink 0.5 - Red/Blue fast blink")
         print("="*60)
 
         while True:
@@ -145,6 +212,13 @@ class LEDTester:
                     self.show_presets()
                     continue
 
+                if cmd == "patterns":
+                    print("\nAvailable blink patterns:")
+                    for name, colors in BLINK_PATTERNS.items():
+                        c1, c2 = colors[0], colors[1]
+                        print(f"  {name:15} - ({c1[0]:.1f},{c1[1]:.1f},{c1[2]:.1f}) \u2194 ({c2[0]:.1f},{c2[1]:.1f},{c2[2]:.1f})")
+                    continue
+
                 if cmd == "off":
                     self.set_color(0, 0, 0)
                     continue
@@ -160,6 +234,23 @@ class LEDTester:
                     else:
                         print(f"Unknown preset: {preset_name}")
                         print("Use 'list' to see available presets")
+                    continue
+
+                # Handle blink command
+                if parts[0] == "blink":
+                    if len(parts) == 2:
+                        # blink <pattern>
+                        self.blink(parts[1])
+                    elif len(parts) == 3:
+                        # blink <pattern> <interval>
+                        try:
+                            interval = float(parts[2])
+                            self.blink(parts[1], interval=interval)
+                        except ValueError:
+                            print("Error: Interval must be a number")
+                    else:
+                        print("Usage: blink <pattern> [interval]")
+                        print("Use 'patterns' to see available blink patterns")
                     continue
 
                 # Handle RGB values
@@ -201,8 +292,30 @@ def main():
     try:
         # Command-line mode
         if len(sys.argv) > 1:
+            # Blink mode
+            if sys.argv[1] == "--blink":
+                if len(sys.argv) == 3:
+                    # --blink <pattern>
+                    pattern_name = sys.argv[2].lower()
+                    tester.blink(pattern_name)
+                elif len(sys.argv) == 4:
+                    # --blink <pattern> <interval>
+                    pattern_name = sys.argv[2].lower()
+                    try:
+                        interval = float(sys.argv[3])
+                        tester.blink(pattern_name, interval=interval)
+                    except ValueError:
+                        print("Error: Interval must be a number")
+                        return 1
+                else:
+                    print("Usage: python rgb.py --blink <pattern> [interval]")
+                    print("\nAvailable patterns:")
+                    for name in BLINK_PATTERNS.keys():
+                        print(f"  {name}")
+                    return 1
+
             # Preset mode
-            if sys.argv[1] == "--preset" and len(sys.argv) == 3:
+            elif sys.argv[1] == "--preset" and len(sys.argv) == 3:
                 preset_name = sys.argv[2].lower()
                 if preset_name in PRESET_COLORS:
                     r, g, b = PRESET_COLORS[preset_name]
