@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from gpiozero import AngularServo, Button, PWMLED # type: ignore
 from huawei_lte_api.Connection import Connection  # type: ignore
 from huawei_lte_api.Client import Client  # type: ignore
@@ -23,6 +24,10 @@ from classes.recovery_manager import RecoveryManager
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
 LOG_FILE = "app.log"
+
+# Threading locks for global variable access
+state_lock = threading.Lock()
+flag_lock = threading.Lock()
 
 # Default configuration values
 DEFAULT_CONFIG = {
@@ -80,7 +85,8 @@ DEFAULT_CONFIG = {
     "read_timeout": 30,
     "keepalive_timeout": 60,
     "circuit_breaker_threshold": 5,
-    "circuit_breaker_cooldown": 60
+    "circuit_breaker_cooldown": 60,
+    "max_consecutive_errors": 30,
 }
 
 class ConfigManager:
@@ -116,7 +122,7 @@ class ConfigManager:
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
 
-VERSION = "V0.3.0"
+VERSION = "V0.3.1"
 
 last_successful_request = time.time()
 last_successful_command_request = time.time()
@@ -185,59 +191,64 @@ def log_error(message):
 def on_network_connection_weak():
     """Callback when network connection has first failure."""
     global state, state_before_connection_issue
-    # Only save previous state if we're not already in a connection issue state
-    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
-        state_before_connection_issue = state
-    state = State.CONNECTION_WEAK
+    with state_lock:
+        # Only save previous state if we're not already in a connection issue state
+        if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+            state_before_connection_issue = state
+        state = State.CONNECTION_WEAK
 
 def on_network_connection_lost():
     """Callback when network connection is completely lost (all retries exhausted)."""
     global state, state_before_connection_issue, no_connection_since
-    # Only save previous state if we're not already in a connection issue state
-    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
-        state_before_connection_issue = state
-    # Track when we entered NO_CONNECTION state
-    if no_connection_since is None:
-        no_connection_since = time.time()
-        log_event("Entered NO_CONNECTION state - modem reboot will trigger if this persists for 60+ seconds")
-    state = State.NO_CONNECTION
+    with state_lock:
+        # Only save previous state if we're not already in a connection issue state
+        if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+            state_before_connection_issue = state
+        # Track when we entered NO_CONNECTION state
+        if no_connection_since is None:
+            no_connection_since = time.time()
+            log_event("Entered NO_CONNECTION state - modem reboot will trigger if this persists for 60+ seconds")
+        state = State.NO_CONNECTION
 
 def on_network_connection_restored():
     """Callback when network connection is restored."""
     global state, state_before_connection_issue, no_connection_since
-    # Clear NO_CONNECTION timer
-    if no_connection_since is not None:
-        duration = time.time() - no_connection_since
-        log_event(f"Connection restored after {duration:.1f} seconds")
-        no_connection_since = None
-    # Restore to previous state if we were in a connection issue state
-    if state in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
-        if state_before_connection_issue is not None:
-            state = state_before_connection_issue
-            state_before_connection_issue = None
-        else:
-            # Fallback to IDLE if we don't have a previous state
-            state = State.IDLE
+    with state_lock:
+        # Clear NO_CONNECTION timer
+        if no_connection_since is not None:
+            duration = time.time() - no_connection_since
+            log_event(f"Connection restored after {duration:.1f} seconds")
+            no_connection_since = None
+        # Restore to previous state if we were in a connection issue state
+        if state in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+            if state_before_connection_issue is not None:
+                state = state_before_connection_issue
+                state_before_connection_issue = None
+            else:
+                # Fallback to IDLE if we don't have a previous state
+                state = State.IDLE
 
 def on_circuit_breaker_open():
     """Callback when circuit breaker opens (server confirmed down, internet is up)."""
     global state, state_before_connection_issue
-    # Only save previous state if we're not already in a connection issue state
-    if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
-        state_before_connection_issue = state
-    state = State.CIRCUIT_BREAKER_OPEN
+    with state_lock:
+        # Only save previous state if we're not already in a connection issue state
+        if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
+            state_before_connection_issue = state
+        state = State.CIRCUIT_BREAKER_OPEN
 
 def on_circuit_breaker_close():
     """Callback when circuit breaker closes (server recovered)."""
     global state, state_before_connection_issue
-    # Restore to previous state if we're in circuit breaker open state
-    if state == State.CIRCUIT_BREAKER_OPEN:
-        if state_before_connection_issue is not None:
-            state = state_before_connection_issue
-            state_before_connection_issue = None
-        else:
-            # Fallback to IDLE if we don't have a previous state
-            state = State.IDLE
+    with state_lock:
+        # Restore to previous state if we're in circuit breaker open state
+        if state == State.CIRCUIT_BREAKER_OPEN:
+            if state_before_connection_issue is not None:
+                state = state_before_connection_issue
+                state_before_connection_issue = None
+            else:
+                # Fallback to IDLE if we don't have a previous state
+                state = State.IDLE
 
 def init_network_client():
     """Initialize network client and recovery manager with configuration."""
@@ -272,11 +283,14 @@ def check_prolonged_no_connection():
     global no_connection_since, last_modem_reboot_attempt
 
     # Don't trigger if modem is already rebooting
-    if state == State.MODEM_REBOOTING:
+    with state_lock:
+        current_state = state
+
+    if current_state == State.MODEM_REBOOTING:
         return
 
     # Only check if we're in NO_CONNECTION state
-    if state != State.NO_CONNECTION or no_connection_since is None:
+    if current_state != State.NO_CONNECTION or no_connection_since is None:
         return
 
     # Calculate how long we've been disconnected
@@ -300,11 +314,12 @@ def reboot_modem():
     global state, state_before_connection_issue
 
     # Save current state before modem reboot
-    state_before_modem_reboot = state
+    with state_lock:
+        state_before_modem_reboot = state
+        state = State.MODEM_REBOOTING
 
     try:
         log_event("Rebooting modem...")
-        state = State.MODEM_REBOOTING
 
         with Connection(config["modem_gateway_url"]) as connection:
             client = Client(connection)
@@ -318,13 +333,16 @@ def reboot_modem():
                 log_event("Modem should be ready now")
 
                 # Restore previous state
-                state = state_before_modem_reboot
+                with state_lock:
+                    state = state_before_modem_reboot
             else:
                 log_error("Modem reboot failed.")
-                state = state_before_modem_reboot
+                with state_lock:
+                    state = state_before_modem_reboot
     except Exception as e:
         log_error(f"Error rebooting modem: {e}")
-        state = state_before_modem_reboot
+        with state_lock:
+            state = state_before_modem_reboot
 
 def init_config():
     global config
@@ -399,14 +417,56 @@ def getInitialHeaders():
 
     return headers
 
-def getHeaders(): 
-    with HuaweiModemReader(config["modem_gateway_url"]) as reader:
-        data = reader.get_signal_data()
+def getHeaders():
+    """
+    Get headers with modem signal data.
 
-    if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
-        status = state.value
-    else:
-        status = "Normal"
+    Attempts to read modem data with timeout/retry. Raises exception if modem
+    is unavailable (indicating no internet connectivity).
+
+    Returns:
+        dict: Headers dictionary with modem data
+
+    Raises:
+        RuntimeError: If modem is unavailable after all retries
+    """
+    def _read_modem_data():
+        """Helper function to read modem data (for timeout wrapping)."""
+        with HuaweiModemReader(config["modem_gateway_url"]) as reader:
+            return reader.get_signal_data()
+
+    # Try to read modem data with timeout and retries
+    data = None
+    max_attempts = 3
+    timeout_seconds = 10
+
+    for attempt in range(max_attempts):
+        try:
+            # Execute modem read with timeout using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_read_modem_data)
+                data = future.result(timeout=timeout_seconds)
+                break  # Success - exit retry loop
+        except FuturesTimeoutError:
+            log_error(f"Modem read timeout (attempt {attempt + 1}/{max_attempts})")
+        except Exception as e:
+            log_error(f"Modem read error (attempt {attempt + 1}/{max_attempts}): {e}")
+
+        # Don't sleep after last attempt
+        if attempt < max_attempts - 1:
+            time.sleep(1)  # Brief delay before retry
+
+    # If modem data unavailable after all retries, raise exception to trigger recovery
+    if data is None:
+        log_error("CRITICAL: Modem unavailable after all retries - no internet connectivity")
+        raise RuntimeError("Modem API unreachable - likely no internet connection")
+
+    # Got modem data successfully - build full headers
+    with state_lock:
+        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
+            status = state.value
+        else:
+            status = "Normal"
 
     headers = {
         "Authorization": config["printer_token"],
@@ -440,22 +500,26 @@ def check_for_new_messages():
         else:
             log_error(f"Error: {response.status_code}")
         last_successful_request = time.time()
-        if state is not State.MESSAGE_RECEIVED:
-            state = State.IDLE
+        with state_lock:
+            if state != State.MESSAGE_RECEIVED:
+                state = State.IDLE
     except Exception as e:
         log_error(f"Failed to check for new messages: {e}")
-        state = State.NO_CONNECTION
+        with state_lock:
+            state = State.NO_CONNECTION
 
 
 
 def handle_message(config, data):
     global state
-    state = State.INCOMING_TRANSMISSION
+    with state_lock:
+        state = State.INCOMING_TRANSMISSION
 
     def handle_transmission_failure():
         global state
-        if state is not State.MESSAGE_RECEIVED:
-            state = State.IDLE
+        with state_lock:
+            if state != State.MESSAGE_RECEIVED:
+                state = State.IDLE
 
     message_id = data.get("id", None)
     
@@ -478,9 +542,10 @@ def handle_message(config, data):
 
     print_completed = track_print(job_id)
     if print_completed:
-        state = State.MESSAGE_RECEIVED
+        with state_lock:
+            state = State.MESSAGE_RECEIVED
         ack_complete_event = threading.Event()
-        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event,), daemon=True)
+        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event,), daemon=False)
         flag_thread.start()
         ack_message(message_id)
         ack_complete_event.set()  # Signal that ACK is complete
@@ -545,12 +610,46 @@ def ack_message(message_id):
     global state
     log_event(f"Acknowledging message ID: {message_id}")
 
+    # Try to get headers before retry loop - if modem unreachable, go straight to recovery
+    try:
+        cached_headers = getHeaders()
+    except Exception as e:
+        log_error(f"CRITICAL: Failed to get headers (modem unreachable) - going into recovery: {e}")
+        # Modem is unreachable, trigger recovery immediately
+        ack_data = {
+            'url': f"{config['url']}{config['ack_url']}?message_id={message_id}",
+            'message_id': message_id
+        }
+
+        # Define try_ack for recovery callback (will retry getting headers)
+        def try_ack():
+            """Try to send acknowledgment"""
+            try:
+                response = network_client.post(
+                    f"{config['url']}{config['ack_url']}?message_id={message_id}",
+                    headers=getHeaders(),
+                    max_attempts=config["retry_critical_attempts"]
+                )
+                log_event(response.text)
+                return True
+            except Exception as e:
+                log_error(f"Failed to acknowledge message: {e}")
+                return False
+
+        recovery_manager.handle_critical_failure(
+            operation_name="ack_message",
+            ack_id=str(message_id),
+            ack_data=ack_data,
+            retry_callback=try_ack
+        )
+        return
+
     def try_ack():
-        """Try to send acknowledgment"""
+        """Try to send acknowledgment using cached headers"""
         try:
             response = network_client.post(
                 f"{config['url']}{config['ack_url']}?message_id={message_id}",
-                headers=getHeaders(),
+                headers=cached_headers,
                 max_attempts=config["retry_critical_attempts"]  # Use critical retry count
             )
             log_event(response.text)
@@ -595,26 +694,31 @@ def print_image(image_path):
     log_event("Printing image...")
     if not os.path.exists(image_path):
         log_error("Image file not found, skipping print...")
-        return
+        return None
+
+    if cupsConn is None:
+        log_error("CUPS connection not initialized, cannot print.")
+        return None
 
     printer_name = config["printer_name"]
     # Detect orientation
-    img = Image.open(image_path)
-    width, height = img.size
-    is_landscape = width > height
+    with Image.open(image_path) as img:
+        width, height = img.size
+        is_landscape = width > height
+
     options = {
         'media': 'custom_max_102x153mm',
         'print-scaling': 'fill',
         'orientation-requested': '4' if is_landscape else '3'  # 3=portrait, 4=landscape
     }
-    
+
     print(f"Image size: {width}x{height} ({'landscape' if is_landscape else 'portrait'})")
 
     try:
-        job_id = cupsConn.printFile(printer_name, image_path, 
+        job_id = cupsConn.printFile(printer_name, image_path,
                                f'Photo Print', options)
-        print(f"✓ Job {job_id} submitted: {image_path}")   
-        return job_id   
+        print(f"✓ Job {job_id} submitted: {image_path}")
+        return job_id
     except Exception as e:
         log_error(f"Error processing image: {e}")
         return None
@@ -622,6 +726,11 @@ def print_image(image_path):
 def track_print(job_id):
     global state
     log_event(f"Tracking job {job_id}...")
+
+    if cupsConn is None:
+        log_error("CUPS connection not initialized, cannot track print job.")
+        return False
+
     # IPP job states
     job_states = {
         3: 'pending',
@@ -659,22 +768,27 @@ def track_print(job_id):
                         current_error = None
                         if "marker-supply-empty-error" in reasons and "input-tray-missing" in reasons:
                             current_error = "No paper casette/ink cartridge or both"
-                            state = State.OUT_OF_INK_AND_PAPER
+                            with state_lock:
+                                state = State.OUT_OF_INK_AND_PAPER
                         elif "media-empty-error" in reasons:
                             current_error = "Out of paper"
-                            state = State.OUT_OF_PAPER
+                            with state_lock:
+                                state = State.OUT_OF_PAPER
                         elif "marker-supply-empty-error" in reasons:
                             current_error = "Out of ink or ink cartridge missing"
-                            state = State.OUT_OF_INK
+                            with state_lock:
+                                state = State.OUT_OF_INK
                         elif "input-tray-missing" in reasons:
                             current_error = "Paper casette missing or incorrectly inserted"
-                            state = State.OUT_OF_PAPER
+                            with state_lock:
+                                state = State.OUT_OF_PAPER
                         if current_error is not None and last_error != current_error:
                             log_error(current_error)
                             last_error = current_error
                             send_status()
                     elif last_error is not None:
-                        state = State.INCOMING_TRANSMISSION
+                        with state_lock:
+                            state = State.INCOMING_TRANSMISSION
                         last_error = None
                         send_status()
 
@@ -699,7 +813,7 @@ def track_print(job_id):
 
             time.sleep(config["print_tracking_interval"])
 
-        except:
+        except Exception as e:
             log_error(f"Error tracking job: {e}")
             traceback.print_exc()
             return False
@@ -707,38 +821,46 @@ def track_print(job_id):
 
 def raise_flag(ack_complete_event):
     global flag_raised, state
-    if flag_raised:
-        log_error("Flag already raised, skipping.")
-        return
+    with flag_lock:
+        if flag_raised:
+            log_error("Flag already raised, skipping.")
+            return
 
     log_event("Raising flag.")
 
     try:
         log_event("Raising flag...")
         set_servo_angle(config["flag_up_angle"])
-        flag_raised = True
+        with flag_lock:
+            flag_raised = True
 
         log_event("Waiting for button press...")
         button.wait_for_press()
 
         log_event("Lowering flag...")
         set_servo_angle(config["flag_down_angle"])
-        flag_raised = False
+        with flag_lock:
+            flag_raised = False
 
         # Check if ACK is still in progress
         if not ack_complete_event.is_set():
-            state = State.ACKNOWLEDGING
+            with state_lock:
+                state = State.ACKNOWLEDGING
             log_event("Waiting for acknowledgment to complete...")
-            ack_complete_event.wait()  # Wait for ACK to finish
+            if not ack_complete_event.wait(timeout=1500):  # 25 minutes = 1500 seconds
+                log_error("Acknowledgment took longer than 25 minutes - proceeding anyway to prevent infinite hang")
 
         # ACK is done, reset state
-        if state is not State.INCOMING_TRANSMISSION:
-            state = State.IDLE
+        with state_lock:
+            if state != State.INCOMING_TRANSMISSION:
+                state = State.IDLE
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
-        if state is not State.INCOMING_TRANSMISSION:
-            state = State.IDLE
-        flag_raised = False
+        with state_lock:
+            if state != State.INCOMING_TRANSMISSION:
+                state = State.IDLE
+        with flag_lock:
+            flag_raised = False
 
 def generate_file_name(directory, mime):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -753,6 +875,9 @@ def init_servo():
 
 def set_servo_angle(angle):
             global servo
+            if servo is None:
+                log_error("Servo not initialized, cannot set angle.")
+                return
             servo.angle = angle
             time.sleep(1)
             servo.detach()
@@ -767,7 +892,10 @@ def set_led_color(red, green, blue):
 def update_led_status():
     global flag_raised
     while True:
-        match state:
+        with state_lock:
+            current_state = state
+
+        match current_state:
             case State.IDLE:
                 set_led_color(0, 1, 0)  # Green
             case State.INCOMING_TRANSMISSION:
@@ -794,6 +922,8 @@ def update_led_status():
                 set_led_color(0.8, 0, 1)  # Purple (modem rebooting)
             case State.BOOTING:
                 set_led_color(1, 1, 0)  # Yellow (initializing)
+            case _:
+                set_led_color(0, 0, 0)  # Off (unknown state)
 
         time.sleep(0.5)
 
@@ -879,12 +1009,46 @@ def dispatchCommand(data):
 def ackCommand(command_id):
     log_event(f"Acknowledging command. ID: {command_id}")
 
+    # Try to get headers before retry loop - if modem unreachable, go straight to recovery
+    try:
+        cached_headers = getHeaders()
+    except Exception as e:
+        log_error(f"CRITICAL: Failed to get headers (modem unreachable) - going into recovery: {e}")
+        # Modem is unreachable, trigger recovery immediately
+        ack_data = {
+            'url': f"{config['url']}{config['command_ack_url']}?command_id={command_id}",
+            'command_id': command_id
+        }
+
+        # Define try_ack for recovery callback (will retry getting headers)
+        def try_ack():
+            """Try to send command acknowledgment"""
+            try:
+                response = network_client.post(
+                    f"{config['url']}{config['command_ack_url']}?command_id={command_id}",
+                    headers=getHeaders(),
+                    max_attempts=config["retry_critical_attempts"]
+                )
+                log_event(response.text)
+                return True
+            except Exception as e:
+                log_error(f"Failed to acknowledge command: {e}")
+                return False
+
+        recovery_manager.handle_critical_failure(
+            operation_name="ackCommand",
+            ack_id=str(command_id),
+            ack_data=ack_data,
+            retry_callback=try_ack
+        )
+        return
+
     def try_ack():
-        """Try to send command acknowledgment"""
+        """Try to send command acknowledgment using cached headers"""
         try:
             response = network_client.post(
                 f"{config['url']}{config['command_ack_url']}?command_id={command_id}",
-                headers=getHeaders(),
+                headers=cached_headers,
                 max_attempts=config["retry_critical_attempts"]  # Use critical retry count
             )
             log_event(response.text)
@@ -927,7 +1091,8 @@ def flagDown():
 def init_CUPS():
     global cupsConn, state
     log_event(f"Waiting {config['initial_delay']}s before connecting to cups")
-    state = State.WAITING_FOR_CUPS
+    with state_lock:
+        state = State.WAITING_FOR_CUPS
     time.sleep(config["initial_delay"])
     start = time.time()
     attempt = 1
@@ -937,7 +1102,8 @@ def init_CUPS():
             cupsConn = cups.Connection()
             cupsConn.getPrinters()
             log_event("CUPS connected")
-            state = State.BOOTING
+            with state_lock:
+                state = State.BOOTING
             if state_sent:
                 send_status()
             return True
@@ -951,7 +1117,6 @@ def init_CUPS():
                 log_error("Cups hasn't started in 5 minutes. Rebooting...")
                 reboot()
             attempt += 1
-    return None
 
 if __name__ == "__main__":
     log_event(f"GPK {VERSION} started")
@@ -970,7 +1135,10 @@ if __name__ == "__main__":
     log_event("Servo initialized")
     init_CUPS()
     log_event("CUPS initialized")
-    state = State.IDLE
+    with state_lock:
+        state = State.IDLE
+    consecutive_errors = 0
+    max_consecutive_errors = config["max_consecutive_errors"]
     while True:
         try:
             # check_supply_levels()
@@ -980,5 +1148,15 @@ if __name__ == "__main__":
             check_for_new_commands()
             check_for_new_messages()
             time.sleep(config["check_interval"])
+            consecutive_errors = 0  # Reset on success
+        except KeyboardInterrupt:
+            log_event("Keyboard interrupt received, shutting down gracefully...")
+            break
         except Exception as e:
-            log_error(f"Unhandled error: {e}")
+            consecutive_errors += 1
+            log_error(f"Unhandled error ({consecutive_errors}/{max_consecutive_errors}): {e}")
+            traceback.print_exc()
+            if consecutive_errors >= max_consecutive_errors:
+                log_error(f"Too many consecutive errors ({max_consecutive_errors}), shutting down...")
+                break
+            time.sleep(5)  # Wait before retrying after error

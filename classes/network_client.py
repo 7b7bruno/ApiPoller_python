@@ -5,6 +5,7 @@ import random
 from enum import Enum
 from typing import Optional, Callable, Any
 import logging
+import threading
 
 
 class CircuitBreakerOpenException(Exception):
@@ -47,21 +48,24 @@ class CircuitBreaker:
         ]
         self.on_breaker_open = on_breaker_open
         self.on_breaker_close = on_breaker_close
+        self.lock = threading.Lock()  # Protect state and failures
 
     def call(self, func: Callable, *args, **kwargs) -> Any:
         """Execute function through circuit breaker"""
-        if self.state == CircuitState.OPEN:
-            if time.time() - self.last_failure_time > self.cooldown:
-                logging.info("Circuit breaker entering HALF_OPEN state for testing")
-                self.state = CircuitState.HALF_OPEN
-            else:
-                raise CircuitBreakerOpenException(f"Circuit breaker is OPEN. Service unavailable. Retry in {int(self.cooldown - (time.time() - self.last_failure_time))}s")
+        with self.lock:
+            if self.state == CircuitState.OPEN:
+                if time.time() - self.last_failure_time > self.cooldown:
+                    logging.info("Circuit breaker entering HALF_OPEN state for testing")
+                    self.state = CircuitState.HALF_OPEN
+                else:
+                    raise CircuitBreakerOpenException(f"Circuit breaker is OPEN. Service unavailable. Retry in {int(self.cooldown - (time.time() - self.last_failure_time))}s")
 
         try:
             result = func(*args, **kwargs)
-            if self.state == CircuitState.HALF_OPEN:
-                logging.info("Circuit breaker test successful, resetting to CLOSED")
-                self.reset()
+            with self.lock:
+                if self.state == CircuitState.HALF_OPEN:
+                    logging.info("Circuit breaker test successful, resetting to CLOSED")
+                    self._reset_unlocked()  # Already have lock
             return result
         except Exception as e:
             self.record_failure()
@@ -92,38 +96,49 @@ class CircuitBreaker:
         Only opens if internet connectivity exists (meaning the target server is down).
         If internet is down, keeps circuit closed so we keep trying.
         """
-        self.failures += 1
-        self.last_failure_time = time.time()
+        should_check_internet = False
+        with self.lock:
+            self.failures += 1
+            self.last_failure_time = time.time()
 
-        if self.failures >= self.failure_threshold:
-            if self.state != CircuitState.OPEN:
-                # Check if we have internet before opening circuit
-                has_internet = self.check_internet_connectivity()
+            if self.failures >= self.failure_threshold and self.state != CircuitState.OPEN:
+                should_check_internet = True
 
-                if has_internet:
-                    logging.warning(
-                        f"Circuit breaker OPENING after {self.failures} consecutive failures. "
-                        f"Internet is up, target server appears down."
-                    )
-                    self.state = CircuitState.OPEN
-                    if self.on_breaker_open:
-                        self.on_breaker_open()
-                else:
-                    logging.warning(
-                        f"Not opening circuit breaker despite {self.failures} failures - "
-                        f"internet connectivity is down (likely modem issue). Will keep retrying."
-                    )
-                    # Don't open the circuit, but reset failure count to avoid log spam
-                    # We'll check again after more failures
-                    self.failures = self.failure_threshold - 1
+        # Check internet connectivity without holding lock (can be slow)
+        if should_check_internet:
+            has_internet = self.check_internet_connectivity()
 
-    def reset(self):
-        """Reset circuit breaker to closed state"""
+            with self.lock:
+                if self.failures >= self.failure_threshold and self.state != CircuitState.OPEN:
+                    if has_internet:
+                        logging.warning(
+                            f"Circuit breaker OPENING after {self.failures} consecutive failures. "
+                            f"Internet is up, target server appears down."
+                        )
+                        self.state = CircuitState.OPEN
+                        if self.on_breaker_open:
+                            self.on_breaker_open()
+                    else:
+                        logging.warning(
+                            f"Not opening circuit breaker despite {self.failures} failures - "
+                            f"internet connectivity is down (likely modem issue). Will keep retrying."
+                        )
+                        # Don't open the circuit, but reset failure count to avoid log spam
+                        # We'll check again after more failures
+                        self.failures = self.failure_threshold - 1
+
+    def _reset_unlocked(self):
+        """Reset circuit breaker to closed state (must be called with lock held)"""
         was_open = self.state == CircuitState.OPEN
         self.failures = 0
         self.state = CircuitState.CLOSED
         if was_open and self.on_breaker_close:
             self.on_breaker_close()
+
+    def reset(self):
+        """Reset circuit breaker to closed state"""
+        with self.lock:
+            self._reset_unlocked()
 
 
 class NetworkClient:
