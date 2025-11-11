@@ -88,6 +88,7 @@ DEFAULT_CONFIG = {
     "circuit_breaker_cooldown": 60,
     "max_consecutive_errors": 30,
     "verbose_logging": False,
+    "no_print": False,
 }
 
 class ConfigManager:
@@ -708,6 +709,16 @@ def print_image(image_path):
         log_error("CUPS connection not initialized, cannot print.")
         return None
 
+    # Check if no_print mode is enabled (for testing without wasting supplies)
+    if config.get("no_print", False):
+        log_event("[NO_PRINT MODE] Simulating print without actually printing")
+        with Image.open(image_path) as img:
+            width, height = img.size
+            is_landscape = width > height
+        print(f"Image size: {width}x{height} ({'landscape' if is_landscape else 'portrait'})")
+        log_event("[NO_PRINT MODE] ✓ Simulated job submitted (no actual print)")
+        return -1  # Return fake job_id to indicate simulated print
+
     printer_name = config["printer_name"]
     # Detect orientation
     with Image.open(image_path) as img:
@@ -734,6 +745,13 @@ def print_image(image_path):
 def track_print(job_id):
     global state
     log_event(f"Tracking job {job_id}...")
+
+    # Check if this is a simulated print (no_print mode)
+    if job_id == -1:
+        log_event("[NO_PRINT MODE] Simulating print tracking - returning success immediately")
+        time.sleep(2)  # Simulate brief delay as if tracking
+        log_event("[NO_PRINT MODE] ✓ Simulated job completed successfully")
+        return True
 
     if cupsConn is None:
         log_error("CUPS connection not initialized, cannot track print job.")
