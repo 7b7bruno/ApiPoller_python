@@ -87,6 +87,7 @@ DEFAULT_CONFIG = {
     "circuit_breaker_threshold": 5,
     "circuit_breaker_cooldown": 60,
     "max_consecutive_errors": 30,
+    "verbose_logging": False,
 }
 
 class ConfigManager:
@@ -187,6 +188,13 @@ def log_error(message):
     timestamp = "[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "]"
     print(f"{timestamp} - {message}")
     logging.error(f"{timestamp} - {message}")
+
+def log_verbose(message):
+    """Log verbose debug messages only if verbose_logging is enabled"""
+    if config.get("verbose_logging", False):
+        timestamp = "[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "]"
+        print(f"{timestamp} - [VERBOSE] {message}")
+        logging.info(f"{timestamp} - [VERBOSE] {message}")
 
 def on_network_connection_weak():
     """Callback when network connection has first failure."""
@@ -545,7 +553,7 @@ def handle_message(config, data):
         with state_lock:
             state = State.MESSAGE_RECEIVED
         ack_complete_event = threading.Event()
-        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event,), daemon=False)
+        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event,), daemon=True)
         flag_thread.start()
         ack_message(message_id)
         ack_complete_event.set()  # Signal that ACK is complete
@@ -839,21 +847,34 @@ def raise_flag(ack_complete_event):
 
         log_event("Lowering flag...")
         set_servo_angle(config["flag_down_angle"])
+        log_verbose("Servo lowered, acquiring flag_lock...")
+
         with flag_lock:
             flag_raised = False
 
+        log_verbose("flag_raised set to False, checking ack_complete_event...")
+
         # Check if ACK is still in progress
         if not ack_complete_event.is_set():
+            log_verbose("ACK still in progress, entering ACKNOWLEDGING state...")
             with state_lock:
                 state = State.ACKNOWLEDGING
             log_event("Waiting for acknowledgment to complete...")
             if not ack_complete_event.wait(timeout=1500):  # 25 minutes = 1500 seconds
                 log_error("Acknowledgment took longer than 25 minutes - proceeding anyway to prevent infinite hang")
+        else:
+            log_verbose("ACK already complete, skipping wait")
+
+        log_verbose("Acquiring state_lock to reset state...")
 
         # ACK is done, reset state
         with state_lock:
+            log_verbose(f"Current state: {state}")
             if state != State.INCOMING_TRANSMISSION:
                 state = State.IDLE
+                log_verbose("State set to IDLE")
+
+        log_verbose("raise_flag completed successfully")
     except Exception as e:
         log_error(f"Error in raise_flag: {e}")
         with state_lock:
@@ -875,12 +896,22 @@ def init_servo():
 
 def set_servo_angle(angle):
             global servo
+            log_verbose(f"set_servo_angle called with angle={angle}")
+
             if servo is None:
                 log_error("Servo not initialized, cannot set angle.")
                 return
+
+            log_verbose(f"Setting servo.angle to {angle}")
             servo.angle = angle
+
+            log_verbose("Sleeping 1 second...")
             time.sleep(1)
+
+            log_verbose("Detaching servo...")
             servo.detach()
+
+            log_verbose("set_servo_angle completed")
 
 # Function to control LED color with PWM (0.0-1.0 for each channel)
 def set_led_color(red, green, blue):
