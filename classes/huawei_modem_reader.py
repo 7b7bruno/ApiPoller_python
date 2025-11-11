@@ -44,20 +44,22 @@ class HuaweiModemReader:
         '101': 'NR5G NSA', '102': 'NR5G SA'
     }
 
-    def __init__(self, url: str = "http://192.168.8.1"):
+    def __init__(self, url: str = "http://192.168.8.1", timeout: int = 10):
         """
         Initialize the HuaweiModemReader.
 
         Args:
             url (str): The modem's base URL. Default is "http://192.168.8.1"
+            timeout (int): Connection timeout in seconds. Default is 10
         """
         self.url = url
+        self.timeout = timeout
         self.connection = None
         self.client = None
 
     def __enter__(self):
         """Context manager entry - establishes connection to the modem."""
-        self.connection = Connection(self.url)
+        self.connection = Connection(self.url, timeout=self.timeout)
         self.connection.__enter__()
         self.client = Client(self.connection)
         return self

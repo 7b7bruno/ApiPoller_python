@@ -208,26 +208,39 @@ def on_network_connection_weak():
 
 def on_network_connection_lost():
     """Callback when network connection is completely lost (all retries exhausted)."""
-    global state, state_before_connection_issue, no_connection_since
+    global state, state_before_connection_issue
     with state_lock:
         # Only save previous state if we're not already in a connection issue state
         if state not in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
             state_before_connection_issue = state
-        # Track when we entered NO_CONNECTION state
-        if no_connection_since is None:
-            no_connection_since = time.time()
-            log_event("Entered NO_CONNECTION state - modem reboot will trigger if this persists for 60+ seconds")
         state = State.NO_CONNECTION
+
+    log_event("Connection lost - triggering recovery manager")
+
+    def retry_connection():
+        """Check if network connection is restored"""
+        try:
+            response = network_client.get(
+                config["url"] + config["request_url"],
+                headers=getInitialHeaders(),
+                max_attempts=1
+            )
+            return response.status_code in [200, 201]
+        except Exception:
+            return False
+
+    recovery_manager.handle_critical_failure(
+        operation_name="network_connection",
+        ack_id="connection_lost",
+        ack_data={},
+        retry_callback=retry_connection
+    )
 
 def on_network_connection_restored():
     """Callback when network connection is restored."""
-    global state, state_before_connection_issue, no_connection_since
+    global state, state_before_connection_issue
     with state_lock:
-        # Clear NO_CONNECTION timer
-        if no_connection_since is not None:
-            duration = time.time() - no_connection_since
-            log_event(f"Connection restored after {duration:.1f} seconds")
-            no_connection_since = None
+        log_event("Connection restored")
         # Restore to previous state if we were in a connection issue state
         if state in [State.CONNECTION_WEAK, State.NO_CONNECTION, State.CIRCUIT_BREAKER_OPEN]:
             if state_before_connection_issue is not None:
@@ -430,45 +443,35 @@ def getHeaders():
     """
     Get headers with modem signal data.
 
-    Attempts to read modem data with timeout/retry. Raises exception if modem
-    is unavailable (indicating no internet connectivity).
+    Attempts to read modem data once with timeout. Falls back to basic headers
+    if modem is unavailable.
 
     Returns:
-        dict: Headers dictionary with modem data
-
-    Raises:
-        RuntimeError: If modem is unavailable after all retries
+        dict: Headers dictionary with or without modem data
     """
-    def _read_modem_data():
-        """Helper function to read modem data (for timeout wrapping)."""
-        with HuaweiModemReader(config["modem_gateway_url"]) as reader:
-            return reader.get_signal_data()
-
-    # Try to read modem data with timeout and retries
+    # Try to read modem data once with timeout (no retries)
     data = None
-    max_attempts = 3
     timeout_seconds = 10
 
-    for attempt in range(max_attempts):
-        try:
-            # Execute modem read with timeout using ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_read_modem_data)
-                data = future.result(timeout=timeout_seconds)
-                break  # Success - exit retry loop
-        except FuturesTimeoutError:
-            log_error(f"Modem read timeout (attempt {attempt + 1}/{max_attempts})")
-        except Exception as e:
-            log_error(f"Modem read error (attempt {attempt + 1}/{max_attempts}): {e}")
+    def _read_modem_data():
+        """Helper function to read modem data (for timeout wrapping)."""
+        with HuaweiModemReader(config["modem_gateway_url"], timeout=timeout_seconds) as reader:
+            return reader.get_signal_data()
 
-        # Don't sleep after last attempt
-        if attempt < max_attempts - 1:
-            time.sleep(1)  # Brief delay before retry
+    try:
+        # Execute modem read with timeout using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_read_modem_data)
+            data = future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError:
+        log_error("Modem read timeout - falling back to basic headers")
+    except Exception as e:
+        log_error(f"Modem read error: {e} - falling back to basic headers")
 
-    # If modem data unavailable after all retries, raise exception to trigger recovery
+    # If modem data unavailable, fall back to basic headers
     if data is None:
-        log_error("CRITICAL: Modem unavailable after all retries - no internet connectivity")
-        raise RuntimeError("Modem API unreachable - likely no internet connection")
+        log_error("Modem unavailable - using basic headers without signal data")
+        return getInitialHeaders()
 
     # Got modem data successfully - build full headers
     with state_lock:
@@ -494,10 +497,13 @@ def check_for_new_messages():
     global last_successful_request, state
     print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Checking for new messages...")
 
+    # Cache headers once to avoid multiple modem reads on retries
+    cached_headers = getHeaders()
+
     try:
         response = network_client.get(
             config["url"] + config["request_url"],
-            headers=getHeaders(),
+            headers=cached_headers,
             max_attempts=5  # More attempts for polling endpoint
         )
         if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
@@ -565,10 +571,12 @@ def handle_message(config, data):
 
 def get_image(config, message_id):
     log_event("Getting image...")
+    # Cache headers once to avoid multiple modem reads on retries
+    cached_headers = getHeaders()
     try:
         response = network_client.get_streaming(
             f"{config['url']}{config['image_url']}/{message_id}",
-            headers=getHeaders(),
+            headers=cached_headers,
             max_attempts=3  # Fewer attempts for large downloads
         )
         if response.status_code == 200 and 'image' in response.headers.get('Content-Type', ''):
@@ -619,39 +627,8 @@ def ack_message(message_id):
     global state
     log_event(f"Acknowledging message ID: {message_id}")
 
-    # Try to get headers before retry loop - if modem unreachable, go straight to recovery
-    try:
-        cached_headers = getHeaders()
-    except Exception as e:
-        log_error(f"CRITICAL: Failed to get headers (modem unreachable) - going into recovery: {e}")
-        # Modem is unreachable, trigger recovery immediately
-        ack_data = {
-            'url': f"{config['url']}{config['ack_url']}?message_id={message_id}",
-            'message_id': message_id
-        }
-
-        # Define try_ack for recovery callback (will retry getting headers)
-        def try_ack():
-            """Try to send acknowledgment"""
-            try:
-                response = network_client.post(
-                    f"{config['url']}{config['ack_url']}?message_id={message_id}",
-                    headers=getHeaders(),
-                    max_attempts=config["retry_critical_attempts"]
-                )
-                log_event(response.text)
-                return True
-            except Exception as e:
-                log_error(f"Failed to acknowledge message: {e}")
-                return False
-
-        recovery_manager.handle_critical_failure(
-            operation_name="ack_message",
-            ack_id=str(message_id),
-            ack_data=ack_data,
-            retry_callback=try_ack
-        )
-        return
+    # Cache headers once to avoid multiple modem reads on retries
+    cached_headers = getHeaders()
 
     def try_ack():
         """Try to send acknowledgment using cached headers"""
@@ -659,7 +636,7 @@ def ack_message(message_id):
             response = network_client.post(
                 f"{config['url']}{config['ack_url']}?message_id={message_id}",
                 headers=cached_headers,
-                max_attempts=config["retry_critical_attempts"]  # Use critical retry count
+                max_attempts=config["retry_critical_attempts"]
             )
             log_event(response.text)
             return True
@@ -689,10 +666,12 @@ def ack_message(message_id):
 
 def send_status():
     log_event(f"Sending printer status - {state} - to server.")
+    # Cache headers once to avoid multiple modem reads on retries
+    cached_headers = getHeaders()
     try:
         response = network_client.get(
             f"{config['url']}{config['auth_check_url']}",
-            headers=getHeaders(),
+            headers=cached_headers,
             max_attempts=3
         )
         log_event(response.text)
@@ -1018,10 +997,12 @@ def init_GPIO():
 
 def check_for_new_commands():
     global last_successful_command_request
+    # Cache headers once to avoid multiple modem reads on retries
+    cached_headers = getHeaders()
     try:
         response = network_client.get(
             config["url"] + config["command_url"],
-            headers=getHeaders(),
+            headers=cached_headers,
             max_attempts=5
         )
         if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
@@ -1058,39 +1039,8 @@ def dispatchCommand(data):
 def ackCommand(command_id):
     log_event(f"Acknowledging command. ID: {command_id}")
 
-    # Try to get headers before retry loop - if modem unreachable, go straight to recovery
-    try:
-        cached_headers = getHeaders()
-    except Exception as e:
-        log_error(f"CRITICAL: Failed to get headers (modem unreachable) - going into recovery: {e}")
-        # Modem is unreachable, trigger recovery immediately
-        ack_data = {
-            'url': f"{config['url']}{config['command_ack_url']}?command_id={command_id}",
-            'command_id': command_id
-        }
-
-        # Define try_ack for recovery callback (will retry getting headers)
-        def try_ack():
-            """Try to send command acknowledgment"""
-            try:
-                response = network_client.post(
-                    f"{config['url']}{config['command_ack_url']}?command_id={command_id}",
-                    headers=getHeaders(),
-                    max_attempts=config["retry_critical_attempts"]
-                )
-                log_event(response.text)
-                return True
-            except Exception as e:
-                log_error(f"Failed to acknowledge command: {e}")
-                return False
-
-        recovery_manager.handle_critical_failure(
-            operation_name="ackCommand",
-            ack_id=str(command_id),
-            ack_data=ack_data,
-            retry_callback=try_ack
-        )
-        return
+    # Cache headers once to avoid multiple modem reads on retries
+    cached_headers = getHeaders()
 
     def try_ack():
         """Try to send command acknowledgment using cached headers"""
@@ -1098,7 +1048,7 @@ def ackCommand(command_id):
             response = network_client.post(
                 f"{config['url']}{config['command_ack_url']}?command_id={command_id}",
                 headers=cached_headers,
-                max_attempts=config["retry_critical_attempts"]  # Use critical retry count
+                max_attempts=config["retry_critical_attempts"]
             )
             log_event(response.text)
             return True
@@ -1191,8 +1141,6 @@ if __name__ == "__main__":
     while True:
         try:
             # check_supply_levels()
-            # Check for prolonged NO_CONNECTION and trigger modem reboot if needed
-            check_prolonged_no_connection()
             # Check for commands first, then messages
             check_for_new_commands()
             check_for_new_messages()
