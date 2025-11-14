@@ -25,6 +25,7 @@ with Connection(URL) as connection:
             connection.reload()
             client.monitoring.status()
             print("Modem booted!")
+            break
         except ResponseErrorException as e:
             print("Modem not available")
             time.sleep(20)
