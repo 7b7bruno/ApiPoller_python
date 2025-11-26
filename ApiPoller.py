@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     "flag_state_url": "/special/flag",
     "modem_restart_url": "/printer/modem-restart",
     "auth_check_url": "/auth/check",
+    "collection_url": "/message/collected",
     "modem_gateway_url": "http://192.168.8.1",
     "print_command": "/snap/bin/cups.lp",
     "printer_name": "Canon_SELPHY_CP1500",
@@ -560,7 +561,7 @@ def handle_message(config, data):
         with state_lock:
             state = State.MESSAGE_RECEIVED
         ack_complete_event = threading.Event()
-        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event,), daemon=True)
+        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event, message_id), daemon=True)
         flag_thread.start()
         ack_message(message_id)
         ack_complete_event.set()  # Signal that ACK is complete
@@ -824,7 +825,7 @@ def track_print(job_id):
             return False
     
 
-def raise_flag(ack_complete_event):
+def raise_flag(ack_complete_event, message_id):
     global flag_raised, state
     with flag_lock:
         if flag_raised:
@@ -864,6 +865,8 @@ def raise_flag(ack_complete_event):
 
         log_verbose("Acquiring state_lock to reset state...")
 
+        send_collection_event(message_id)
+
         # ACK is done, reset state
         with state_lock:
             log_verbose(f"Current state: {state}")
@@ -879,6 +882,20 @@ def raise_flag(ack_complete_event):
                 state = State.IDLE
         with flag_lock:
             flag_raised = False
+
+def send_collection_event(message_id):
+    log_event(f"Sending collection event to server.")
+    # Cache headers once to avoid multiple modem reads on retries
+    cached_headers = getHeaders()
+    try:
+        response = network_client.get(
+            f"{config['url']}{config['collection_url']}?message_id={message_id}",
+            headers=cached_headers,
+            max_attempts=3
+        )
+        log_event(response.text)
+    except Exception as e:
+        log_error(f"Failed to send printer status to server: {e}")
 
 def generate_file_name(directory, mime):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
