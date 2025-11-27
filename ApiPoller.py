@@ -888,7 +888,7 @@ def send_collection_event(message_id):
     # Cache headers once to avoid multiple modem reads on retries
     cached_headers = getHeaders()
     try:
-        response = network_client.get(
+        response = network_client.post(
             f"{config['url']}{config['collection_url']}?message_id={message_id}",
             headers=cached_headers,
             max_attempts=3
