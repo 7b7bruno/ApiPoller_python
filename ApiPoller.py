@@ -126,7 +126,7 @@ class ConfigManager:
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
 
-VERSION = "V0.3.3"
+VERSION = "V0.3.4"
 
 last_successful_request = time.time()
 last_successful_command_request = time.time()
