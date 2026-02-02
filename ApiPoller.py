@@ -28,6 +28,7 @@ LOG_FILE = "app.log"
 # Threading locks for global variable access
 state_lock = threading.Lock()
 flag_lock = threading.Lock()
+pending_ids_lock = threading.Lock()
 
 # Default configuration values
 DEFAULT_CONFIG = {
@@ -134,6 +135,7 @@ servo = None
 button = None
 flag_raised = False
 config = ConfigManager(DEFAULT_CONFIG)
+pending_message_ids = []
 
 # LED OutputDevice objects
 led_red = None
@@ -560,8 +562,10 @@ def handle_message(config, data):
     if print_completed:
         with state_lock:
             state = State.MESSAGE_RECEIVED
+        with pending_ids_lock:
+            pending_message_ids.append(message_id)
         ack_complete_event = threading.Event()
-        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event, message_id), daemon=True)
+        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event), daemon=True)
         flag_thread.start()
         ack_message(message_id)
         ack_complete_event.set()  # Signal that ACK is complete
@@ -825,7 +829,7 @@ def track_print(job_id):
             return False
     
 
-def raise_flag(ack_complete_event, message_id):
+def raise_flag(ack_complete_event):
     global flag_raised, state
     with flag_lock:
         if flag_raised:
@@ -863,9 +867,16 @@ def raise_flag(ack_complete_event, message_id):
         else:
             log_verbose("ACK already complete, skipping wait")
 
-        log_verbose("Acquiring state_lock to reset state...")
+        log_verbose("Acquiring pending_ids_lock to reset pending ids...")
+        with pending_ids_lock:
+            ids_to_send = list(pending_message_ids)
+            pending_message_ids.clear()
 
-        send_collection_event(message_id)
+        if ids_to_send:
+            log_verbose("Sending collection events for pending ids")
+            send_collection_event(ids_to_send)
+
+        log_verbose("Acquiring state_lock to reset state...")
 
         # ACK is done, reset state
         with state_lock:
@@ -883,14 +894,15 @@ def raise_flag(ack_complete_event, message_id):
         with flag_lock:
             flag_raised = False
 
-def send_collection_event(message_id):
-    log_event(f"Sending collection event to server.")
+def send_collection_event(message_ids):
+    log_event(f"Sending collection event for {len(message_ids)} message(s):{message_ids}")
     # Cache headers once to avoid multiple modem reads on retries
     cached_headers = getHeaders()
     try:
         response = network_client.post(
-            f"{config['url']}{config['collection_url']}?message_id={message_id}",
+            f"{config['url']}{config['collection_url']}",
             headers=cached_headers,
+            json={"message_ids": message_ids},
             max_attempts=3
         )
         log_event(response.text)
