@@ -565,7 +565,7 @@ def handle_message(config, data):
         with pending_ids_lock:
             pending_message_ids.append(message_id)
         ack_complete_event = threading.Event()
-        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event), daemon=True)
+        flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event,), daemon=True)
         flag_thread.start()
         ack_message(message_id)
         ack_complete_event.set()  # Signal that ACK is complete
