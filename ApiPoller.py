@@ -1087,7 +1087,6 @@ def init_GPIO():
     # Diagnostic logging to verify callback registration
     log_event(f"Button callback registered: {button.when_pressed}")
     log_event(f"Button pin: {button.pin}, is_pressed: {button.is_pressed}")
-    log_event(f"Button._when_pressed: {button._when_pressed}")
     log_event(f"Button.pin.state: {button.pin.state}")
 
     # Start diagnostic polling thread
