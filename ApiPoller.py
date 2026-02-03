@@ -30,6 +30,7 @@ PENDING_COLLECTIONS_FILE = "pending_collections.json"
 state_lock = threading.Lock()
 flag_lock = threading.Lock()
 pending_ids_lock = threading.Lock()
+button_press_event = threading.Event()
 
 # Default configuration values
 DEFAULT_CONFIG = {
@@ -866,9 +867,10 @@ def raise_flag(ack_complete_event):
         set_servo_angle(config["flag_up_angle"])
         with flag_lock:
             flag_raised = True
+            button_press_event.clear()
 
         log_event("Waiting for button press...")
-        button.wait_for_press()
+        button_press_event.wait()
 
         log_event("Lowering flag...")
         set_servo_angle(config["flag_down_angle"])
@@ -1047,11 +1049,13 @@ def init_paper_led():
         log_event("This model does not have a paper indicator light.")
 
 def on_button_pressed():
-    """Handle button press - send pending collections if flag is not raised."""
+    """Handle button press - signal flag thread or send pending collections."""
     log_event("Door opened")
     with flag_lock:
         if flag_raised:
-            # Flag is raised, let raise_flag() handle it via wait_for_press()
+            # Signal the flag thread to continue
+            log_event("Button press detected - signaling flag thread")
+            button_press_event.set()
             return
 
     # Flag not raised, check for pending collections to send
