@@ -870,7 +870,9 @@ def raise_flag(ack_complete_event):
             button_press_event.clear()
 
         log_event("Waiting for button press...")
+        log_event(f"[DEBUG] About to wait, event_is_set={button_press_event.is_set()}")
         button_press_event.wait()
+        log_event(f"[DEBUG] Wait completed, event_is_set={button_press_event.is_set()}")
 
         log_event("Lowering flag...")
         set_servo_angle(config["flag_down_angle"])
@@ -1052,10 +1054,12 @@ def on_button_pressed():
     """Handle button press - signal flag thread or send pending collections."""
     log_event("Door opened")
     with flag_lock:
+        log_event(f"[DEBUG] flag_raised={flag_raised}, event_is_set={button_press_event.is_set()}")
         if flag_raised:
             # Signal the flag thread to continue
             log_event("Button press detected - signaling flag thread")
             button_press_event.set()
+            log_event(f"[DEBUG] Event set, now is_set={button_press_event.is_set()}")
             return
 
     # Flag not raised, check for pending collections to send
