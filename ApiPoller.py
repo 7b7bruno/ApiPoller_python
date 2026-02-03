@@ -1048,26 +1048,22 @@ def init_paper_led():
 
 def on_button_pressed():
     """Handle button press - send pending collections if flag is not raised."""
-    try:
-        log_event("Button pressed")
-        with flag_lock:
-            if flag_raised:
-                # Flag is raised, let raise_flag() handle it via wait_for_press()
-                return
+    log_event("Door opened")
+    with flag_lock:
+        if flag_raised:
+            # Flag is raised, let raise_flag() handle it via wait_for_press()
+            return
 
-        # Flag not raised, check for pending collections to send
-        with pending_ids_lock:
-            if not pending_message_ids:
-                return
-            ids_to_send = list(pending_message_ids)
-            pending_message_ids.clear()
-            save_pending_collections()
+    # Flag not raised, check for pending collections to send
+    with pending_ids_lock:
+        if not pending_message_ids:
+            return
+        ids_to_send = list(pending_message_ids)
+        pending_message_ids.clear()
+        save_pending_collections()
 
-        log_event(f"Button pressed while flag down - sending {len(ids_to_send)} pending collection(s)")
-        send_collection_event(ids_to_send)
-    except Exception as e:
-        log_error(f"Error in on_button_pressed: {e}")
-        traceback.print_exc()
+    log_event(f"Button pressed while flag down - sending {len(ids_to_send)} pending collection(s)")
+    send_collection_event(ids_to_send)
 
 def init_GPIO():
     global button
