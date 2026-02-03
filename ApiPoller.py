@@ -867,9 +867,9 @@ def raise_flag(ack_complete_event):
         set_servo_angle(config["flag_up_angle"])
         with flag_lock:
             flag_raised = True
+            button_press_event.clear()
 
         log_event("Waiting for button press...")
-        button_press_event.clear()
         button_press_event.wait()
 
         log_event("Lowering flag...")
@@ -1050,23 +1050,27 @@ def init_paper_led():
 
 def on_button_pressed():
     """Handle button press - signal flag thread or send pending collections."""
-    log_event("Button pressed")
-    with flag_lock:
-        if flag_raised:
-            # Signal the flag thread to continue
-            button_press_event.set()
-            return
+    try:
+        log_event("Button pressed")
+        with flag_lock:
+            if flag_raised:
+                # Signal the flag thread to continue
+                button_press_event.set()
+                return
 
-    # Flag not raised, check for pending collections to send
-    with pending_ids_lock:
-        if not pending_message_ids:
-            return
-        ids_to_send = list(pending_message_ids)
-        pending_message_ids.clear()
-        save_pending_collections()
+        # Flag not raised, check for pending collections to send
+        with pending_ids_lock:
+            if not pending_message_ids:
+                return
+            ids_to_send = list(pending_message_ids)
+            pending_message_ids.clear()
+            save_pending_collections()
 
-    log_event(f"Button pressed while flag down - sending {len(ids_to_send)} pending collection(s)")
-    send_collection_event(ids_to_send)
+        log_event(f"Button pressed while flag down - sending {len(ids_to_send)} pending collection(s)")
+        send_collection_event(ids_to_send)
+    except Exception as e:
+        log_error(f"Error in on_button_pressed: {e}")
+        traceback.print_exc()
 
 def init_GPIO():
     global button
