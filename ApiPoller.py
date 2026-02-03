@@ -1069,10 +1069,31 @@ def on_button_pressed():
     log_event(f"Button pressed while flag down - sending {len(ids_to_send)} pending collection(s)")
     send_collection_event(ids_to_send)
 
+def debug_button_state():
+    """Temporary diagnostic - poll button state to verify hardware."""
+    last_state = None
+    while True:
+        current = button.is_pressed
+        if current != last_state:
+            log_event(f"[DEBUG] Button state changed: {current}")
+            last_state = current
+        time.sleep(0.1)
+
 def init_GPIO():
     global button
     button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
     button.when_pressed = on_button_pressed
+
+    # Diagnostic logging to verify callback registration
+    log_event(f"Button callback registered: {button.when_pressed}")
+    log_event(f"Button pin: {button.pin}, is_pressed: {button.is_pressed}")
+    log_event(f"Button._when_pressed: {button._when_pressed}")
+    log_event(f"Button.pin.state: {button.pin.state}")
+
+    # Start diagnostic polling thread
+    debug_thread = threading.Thread(target=debug_button_state, daemon=True)
+    debug_thread.start()
+    log_event("Button debug polling started")
 
 def check_for_new_commands():
     global last_successful_command_request
