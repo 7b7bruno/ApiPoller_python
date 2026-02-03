@@ -1050,6 +1050,7 @@ def init_paper_led():
 
 def on_button_pressed():
     """Handle button press - signal flag thread or send pending collections."""
+    log_event("Button pressed")
     with flag_lock:
         if flag_raised:
             # Signal the flag thread to continue
