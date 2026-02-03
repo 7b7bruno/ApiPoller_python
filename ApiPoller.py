@@ -1079,8 +1079,23 @@ def debug_button_state():
             last_state = current
         time.sleep(0.1)
 
+def polling_button_handler():
+    """Polling-based button detection as fallback for broken gpiozero callbacks."""
+    last_state = False
+    while True:
+        current = button.is_pressed
+        # Detect rising edge (button press)
+        if current and not last_state:
+            log_event("[POLLING] Button press detected - calling handler")
+            on_button_pressed()
+        last_state = current
+        time.sleep(0.05)  # 50ms polling interval
+
 def init_GPIO():
     global button
+    from gpiozero import Device
+    log_event(f"[DEBUG] Pin factory: {Device.pin_factory}")
+
     button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
     button.when_pressed = on_button_pressed
 
@@ -1089,10 +1104,19 @@ def init_GPIO():
     log_event(f"Button pin: {button.pin}, is_pressed: {button.is_pressed}")
     log_event(f"Button.pin.state: {button.pin.state}")
 
+    # Check the underlying pin's edge detection
+    log_event(f"[DEBUG] button.pin.edges: {getattr(button.pin, 'edges', 'N/A')}")
+    log_event(f"[DEBUG] button.pin.when_changed: {getattr(button.pin, 'when_changed', 'N/A')}")
+
     # Start diagnostic polling thread
     debug_thread = threading.Thread(target=debug_button_state, daemon=True)
     debug_thread.start()
     log_event("Button debug polling started")
+
+    # TEMPORARY: Start polling-based handler as fallback
+    polling_thread = threading.Thread(target=polling_button_handler, daemon=True)
+    polling_thread.start()
+    log_event("Polling button handler started (fallback)")
 
 def check_for_new_commands():
     global last_successful_command_request
