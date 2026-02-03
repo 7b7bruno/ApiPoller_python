@@ -24,10 +24,12 @@ from classes.recovery_manager import RecoveryManager
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
 LOG_FILE = "app.log"
+PENDING_COLLECTIONS_FILE = "pending_collections.json"
 
 # Threading locks for global variable access
 state_lock = threading.Lock()
 flag_lock = threading.Lock()
+pending_ids_lock = threading.Lock()
 
 # Default configuration values
 DEFAULT_CONFIG = {
@@ -43,6 +45,7 @@ DEFAULT_CONFIG = {
     "flag_state_url": "/special/flag",
     "modem_restart_url": "/printer/modem-restart",
     "auth_check_url": "/auth/check",
+    "collection_url": "/message/collected",
     "modem_gateway_url": "http://192.168.8.1",
     "print_command": "/snap/bin/cups.lp",
     "printer_name": "Canon_SELPHY_CP1500",
@@ -89,6 +92,7 @@ DEFAULT_CONFIG = {
     "max_consecutive_errors": 30,
     "verbose_logging": False,
     "no_print": False,
+    "collection_notifications": True,
 }
 
 class ConfigManager:
@@ -124,7 +128,7 @@ class ConfigManager:
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
 
-VERSION = "V0.3.2"
+VERSION = "V0.3.4"
 
 last_successful_request = time.time()
 last_successful_command_request = time.time()
@@ -133,6 +137,27 @@ servo = None
 button = None
 flag_raised = False
 config = ConfigManager(DEFAULT_CONFIG)
+pending_message_ids = []
+
+def load_pending_collections():
+    """Load pending message IDs from persistent storage."""
+    global pending_message_ids
+    if os.path.exists(PENDING_COLLECTIONS_FILE):
+        try:
+            with open(PENDING_COLLECTIONS_FILE, 'r') as f:
+                pending_message_ids = json.load(f)
+                log_event(f"Loaded {len(pending_message_ids)} pending collection ID(s) from disk.")
+        except Exception as e:
+            log_error(f"Failed to load pending collections: {e}")
+            pending_message_ids = []
+
+def save_pending_collections():
+    """Save pending message IDs to persistent storage."""
+    try:
+        with open(PENDING_COLLECTIONS_FILE, 'w') as f:
+            json.dump(pending_message_ids, f)
+    except Exception as e:
+        log_error(f"Failed to save pending collections: {e}")
 
 # LED OutputDevice objects
 led_red = None
@@ -559,6 +584,9 @@ def handle_message(config, data):
     if print_completed:
         with state_lock:
             state = State.MESSAGE_RECEIVED
+        with pending_ids_lock:
+            pending_message_ids.append(message_id)
+            save_pending_collections()
         ack_complete_event = threading.Event()
         flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event,), daemon=True)
         flag_thread.start()
@@ -862,6 +890,16 @@ def raise_flag(ack_complete_event):
         else:
             log_verbose("ACK already complete, skipping wait")
 
+        log_verbose("Acquiring pending_ids_lock to reset pending ids...")
+        with pending_ids_lock:
+            ids_to_send = list(pending_message_ids)
+            pending_message_ids.clear()
+            save_pending_collections()
+
+        if ids_to_send:
+            log_verbose("Sending collection events for pending ids")
+            send_collection_event(ids_to_send)
+
         log_verbose("Acquiring state_lock to reset state...")
 
         # ACK is done, reset state
@@ -879,6 +917,24 @@ def raise_flag(ack_complete_event):
                 state = State.IDLE
         with flag_lock:
             flag_raised = False
+
+def send_collection_event(message_ids):
+    if not config["collection_notifications"]:
+        log_verbose(f"Collection notifications disabled, skipping {len(message_ids)} message(s)")
+        return
+    log_event(f"Sending collection event for {len(message_ids)} message(s):{message_ids}")
+    # Cache headers once to avoid multiple modem reads on retries
+    cached_headers = getHeaders()
+    try:
+        response = network_client.post(
+            f"{config['url']}{config['collection_url']}",
+            headers=cached_headers,
+            json={"message_ids": message_ids},
+            max_attempts=3
+        )
+        log_event(response.text)
+    except Exception as e:
+        log_error(f"Failed to send printer status to server: {e}")
 
 def generate_file_name(directory, mime):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -990,10 +1046,29 @@ def init_paper_led():
     else:
         log_event("This model does not have a paper indicator light.")
 
+def on_button_pressed():
+    """Handle button press - send pending collections if flag is not raised."""
+    log_event("Door opened")
+    with flag_lock:
+        if flag_raised:
+            # Flag is raised, let raise_flag() handle it via wait_for_press()
+            return
+
+    # Flag not raised, check for pending collections to send
+    with pending_ids_lock:
+        if not pending_message_ids:
+            return
+        ids_to_send = list(pending_message_ids)
+        pending_message_ids.clear()
+        save_pending_collections()
+
+    log_event(f"Button pressed while flag down - sending {len(ids_to_send)} pending collection(s)")
+    send_collection_event(ids_to_send)
+
 def init_GPIO():
     global button
     button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
-    # button.when_pressed = _on_door_open
+    button.when_pressed = on_button_pressed
 
 def check_for_new_commands():
     global last_successful_command_request
@@ -1123,6 +1198,8 @@ if __name__ == "__main__":
     log_event("conf loaded from file")
     init_network_client()
     log_event("Network client initialized")
+    load_pending_collections()
+    log_event("Pending collections loaded")
     init_GPIO()
     log_event("GPIO initialized")
     init_led()
