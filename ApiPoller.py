@@ -24,6 +24,7 @@ from classes.recovery_manager import RecoveryManager
 CONFIG_FILE = "config.json"
 STATUS_FILE = "printer_status.json"
 LOG_FILE = "app.log"
+PENDING_COLLECTIONS_FILE = "pending_collections.json"
 
 # Threading locks for global variable access
 state_lock = threading.Lock()
@@ -136,6 +137,26 @@ button = None
 flag_raised = False
 config = ConfigManager(DEFAULT_CONFIG)
 pending_message_ids = []
+
+def load_pending_collections():
+    """Load pending message IDs from persistent storage."""
+    global pending_message_ids
+    if os.path.exists(PENDING_COLLECTIONS_FILE):
+        try:
+            with open(PENDING_COLLECTIONS_FILE, 'r') as f:
+                pending_message_ids = json.load(f)
+                log_event(f"Loaded {len(pending_message_ids)} pending collection ID(s) from disk.")
+        except Exception as e:
+            log_error(f"Failed to load pending collections: {e}")
+            pending_message_ids = []
+
+def save_pending_collections():
+    """Save pending message IDs to persistent storage."""
+    try:
+        with open(PENDING_COLLECTIONS_FILE, 'w') as f:
+            json.dump(pending_message_ids, f)
+    except Exception as e:
+        log_error(f"Failed to save pending collections: {e}")
 
 # LED OutputDevice objects
 led_red = None
@@ -564,6 +585,7 @@ def handle_message(config, data):
             state = State.MESSAGE_RECEIVED
         with pending_ids_lock:
             pending_message_ids.append(message_id)
+            save_pending_collections()
         ack_complete_event = threading.Event()
         flag_thread = threading.Thread(target=raise_flag, args=(ack_complete_event,), daemon=True)
         flag_thread.start()
@@ -871,6 +893,7 @@ def raise_flag(ack_complete_event):
         with pending_ids_lock:
             ids_to_send = list(pending_message_ids)
             pending_message_ids.clear()
+            save_pending_collections()
 
         if ids_to_send:
             log_verbose("Sending collection events for pending ids")
@@ -1019,10 +1042,28 @@ def init_paper_led():
     else:
         log_event("This model does not have a paper indicator light.")
 
+def on_button_pressed():
+    """Handle button press - send pending collections if flag is not raised."""
+    with flag_lock:
+        if flag_raised:
+            # Flag is raised, let raise_flag() handle it via wait_for_press()
+            return
+
+    # Flag not raised, check for pending collections to send
+    with pending_ids_lock:
+        if not pending_message_ids:
+            return
+        ids_to_send = list(pending_message_ids)
+        pending_message_ids.clear()
+        save_pending_collections()
+
+    log_event(f"Button pressed while flag down - sending {len(ids_to_send)} pending collection(s)")
+    send_collection_event(ids_to_send)
+
 def init_GPIO():
     global button
     button = Button(config["button_pin"], pull_up=True, bounce_time=0.1)
-    # button.when_pressed = _on_door_open
+    button.when_pressed = on_button_pressed
 
 def check_for_new_commands():
     global last_successful_command_request
@@ -1152,6 +1193,8 @@ if __name__ == "__main__":
     log_event("conf loaded from file")
     init_network_client()
     log_event("Network client initialized")
+    load_pending_collections()
+    log_event("Pending collections loaded")
     init_GPIO()
     log_event("GPIO initialized")
     init_led()
