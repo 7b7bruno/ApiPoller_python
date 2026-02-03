@@ -92,6 +92,7 @@ DEFAULT_CONFIG = {
     "max_consecutive_errors": 30,
     "verbose_logging": False,
     "no_print": False,
+    "collection_notifications": True,
 }
 
 class ConfigManager:
@@ -918,6 +919,9 @@ def raise_flag(ack_complete_event):
             flag_raised = False
 
 def send_collection_event(message_ids):
+    if not config["collection_notifications"]:
+        log_verbose(f"Collection notifications disabled, skipping {len(message_ids)} message(s)")
+        return
     log_event(f"Sending collection event for {len(message_ids)} message(s):{message_ids}")
     # Cache headers once to avoid multiple modem reads on retries
     cached_headers = getHeaders()
