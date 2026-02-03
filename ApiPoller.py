@@ -864,10 +864,13 @@ def raise_flag(ack_complete_event):
 
     try:
         log_event("Raising flag...")
-        set_servo_angle(config["flag_up_angle"])
+        # Set flag_raised BEFORE moving servo to avoid race condition
+        # (button press during servo movement would otherwise be missed)
         with flag_lock:
             flag_raised = True
             button_press_event.clear()
+
+        set_servo_angle(config["flag_up_angle"])
 
         log_event("Waiting for button press...")
         log_event(f"[DEBUG] About to wait, event_is_set={button_press_event.is_set()}")
