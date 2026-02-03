@@ -1044,6 +1044,7 @@ def init_paper_led():
 
 def on_button_pressed():
     """Handle button press - send pending collections if flag is not raised."""
+    log_event("Door opened")
     with flag_lock:
         if flag_raised:
             # Flag is raised, let raise_flag() handle it via wait_for_press()
