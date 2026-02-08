@@ -17,6 +17,7 @@ import cups
 import traceback
 import enum
 import math
+from dataclasses import dataclass
 from classes.huawei_modem_reader import HuaweiModemReader
 from classes.network_client import NetworkClient
 from classes.recovery_manager import RecoveryManager
@@ -128,6 +129,13 @@ class ConfigManager:
     def __contains__(self, key):
         """Support 'in' operator."""
         return key in self.config or key in self.defaults
+    
+
+@dataclass
+class Route:
+    interface: str
+    metric: int
+    gateway: str
 
 VERSION = "V0.3.6"
 
@@ -458,9 +466,53 @@ def check_config(data):
 
     return token.isalnum()
 
+def get_default_routes() -> list[Route]:
+    """Get all default routes, sorted by preference (lowest metric first)."""
+    routes = []
+    try:
+        result = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True, text=True
+        )
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            parts = line.split()
+            
+            iface = parts[parts.index("dev") + 1] if "dev" in parts else None
+            metric = int(parts[parts.index("metric") + 1]) if "metric" in parts else 0
+            gateway = parts[parts.index("via") + 1] if "via" in parts else None
+            
+            if iface:
+                routes.append(Route(iface, metric, gateway))
+    except Exception:
+        pass
+    
+    return sorted(routes, key=lambda r: r.metric)
+
+def get_connection_type():
+    routes = get_default_routes()
+    if not routes:
+        return "none"
+    
+    iface = routes[0].interface  # Lowest metric = active
+    
+    if iface == "wlan0":
+        return "wifi"
+    elif iface in ("ppp0", "wwan0", "usb0"):
+        return "lte"
+    return "unknown"
+
 def getInitialHeaders():
+    with state_lock:
+        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
+            status = state.value
+        else:
+            status = "Normal"
+
     headers = {
-        "Authorization": config["printer_token"]
+        "Authorization": config["printer_token"],
+        "X-Printer-Status": status
     }
 
     return headers
@@ -475,9 +527,16 @@ def getHeaders():
     Returns:
         dict: Headers dictionary with or without modem data
     """
+
+    connection_type = get_connection_type()
+
+    if connection_type == "wifi":
+        log_event("Using wifi, sending basic headers...")
+        return getInitialHeaders()
+    
     # Try to read modem data once with timeout (no retries)
     data = None
-    timeout_seconds = 10
+    timeout_seconds = 2
 
     def _read_modem_data():
         """Helper function to read modem data (for timeout wrapping)."""
