@@ -17,6 +17,7 @@ import cups
 import traceback
 import enum
 import math
+import glob as glob_module
 from dataclasses import dataclass
 from classes.huawei_modem_reader import HuaweiModemReader
 from classes.network_client import NetworkClient
@@ -785,26 +786,23 @@ def send_status():
 
 def check_printer_reachable():
     global state
-    printer_name = config["printer_name"]
     status_sent = False
     with state_lock:
         previous_state = state
     while True:
-        try:
-            attrs = cupsConn.getPrinterAttributes(printer_name)
-            if attrs.get("printer-is-accepting-jobs", False):
-                if status_sent:
-                    with state_lock:
-                        state = previous_state
-                    send_status()
-                return True
-        except Exception as e:
-            log_error(f"Printer unreachable: {e}")
+        if glob_module.glob("/dev/usb/lp*"):
+            if status_sent:
+                with state_lock:
+                    state = previous_state
+                send_status()
+                log_event("Printer USB device detected again")
+            return True
 
         with state_lock:
             if state != State.PRINTER_UNREACHABLE:
                 state = State.PRINTER_UNREACHABLE
         if not status_sent:
+            log_error("Printer unreachable: no USB device found at /dev/usb/lp*")
             send_status()
             status_sent = True
         time.sleep(5)
