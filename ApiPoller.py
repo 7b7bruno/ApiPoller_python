@@ -263,6 +263,11 @@ def on_network_connection_lost():
         except Exception:
             return False
 
+    # Skip recovery escalation if connected via wifi - modem reboot won't help
+    if get_connection_type() == "wifi":
+        log_event("Connection lost but connected via wifi. Skipping modem reboot - recovery will rely on network client retries.")
+        return
+
     recovery_manager.handle_critical_failure(
         operation_name="network_connection",
         ack_id="connection_lost",
@@ -354,6 +359,11 @@ def check_prolonged_no_connection():
 
     # Check if we've been disconnected for more than 60 seconds
     if disconnected_duration > 60:
+        # Skip modem reboot if connected via wifi - modem isn't the active connection
+        if get_connection_type() == "wifi":
+            log_event(f"NO_CONNECTION for {disconnected_duration:.0f}s, but connected via wifi. Skipping modem reboot.")
+            return
+
         # Check cooldown - don't reboot more than once per 5 minutes
         if last_modem_reboot_attempt is not None:
             time_since_last_reboot = time.time() - last_modem_reboot_attempt
@@ -743,6 +753,11 @@ def ack_message(message_id):
             'url': f"{config['url']}{config['ack_url']}?message_id={message_id}",
             'message_id': message_id
         }
+
+        # Skip recovery escalation if connected via wifi - modem reboot won't help
+        if get_connection_type() == "wifi":
+            log_event(f"Ack message {message_id} failed but connected via wifi. Skipping modem reboot.")
+            return
 
         # Use recovery manager to handle escalation
         recovery_manager.handle_critical_failure(
@@ -1236,6 +1251,11 @@ def ackCommand(command_id):
             'url': f"{config['url']}{config['command_ack_url']}?command_id={command_id}",
             'command_id': command_id
         }
+
+        # Skip recovery escalation if connected via wifi - modem reboot won't help
+        if get_connection_type() == "wifi":
+            log_event(f"Ack command {command_id} failed but connected via wifi. Skipping modem reboot.")
+            return
 
         # Use recovery manager to handle escalation
         recovery_manager.handle_critical_failure(
