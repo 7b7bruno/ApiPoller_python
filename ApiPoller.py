@@ -794,7 +794,7 @@ def check_printer_reachable():
             result = subprocess.run(
                 ["lsusb"], capture_output=True, text=True, timeout=5
             )
-            is_reachable = "CP1500" in result.stdout.lower()
+            is_reachable = "cp1500" in result.stdout.lower()
         except Exception:
             is_reachable = False
 
