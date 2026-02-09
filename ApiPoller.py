@@ -196,6 +196,7 @@ class State(enum.Enum):
     OUT_OF_PAPER = "Out of paper"
     OUT_OF_INK = "Out of ink"
     OUT_OF_INK_AND_PAPER = "Out of ink and paper"
+    PAPER_JAM = "Paper jam"
     WAITING_FOR_CUPS = "Waiting for CUPS to start"
     CONNECTION_WEAK = "Connection weak"
     NO_CONNECTION = "No connection"
@@ -515,7 +516,7 @@ def get_connection_type():
 
 def getInitialHeaders():
     with state_lock:
-        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
+        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.PAPER_JAM, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
             status = state.value
         else:
             status = "Normal"
@@ -570,7 +571,7 @@ def getHeaders():
 
     # Got modem data successfully - build full headers
     with state_lock:
-        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
+        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.PAPER_JAM, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
             status = state.value
         else:
             status = "Normal"
@@ -890,6 +891,10 @@ def track_print(job_id):
                             current_error = "Paper casette missing or incorrectly inserted"
                             with state_lock:
                                 state = State.OUT_OF_PAPER
+                        elif "media-jam-error" in reasons:
+                            current_error = "Paper jam"
+                            with state_lock:
+                                state = State.PAPER_JAM
                         if current_error is not None and last_error != current_error:
                             log_error(current_error)
                             last_error = current_error
@@ -1074,6 +1079,8 @@ def update_led_status():
             case State.OUT_OF_PAPER:
                 set_led_color(1, 0, 0)  # Red
             case State.OUT_OF_INK_AND_PAPER:
+                set_led_color(1, 0, 0)  # Red
+            case State.PAPER_JAM:
                 set_led_color(1, 0, 0)  # Red
             case State.WAITING_FOR_CUPS:
                 set_led_color(1, 0, 1)  # Magenta

@@ -61,6 +61,8 @@ def track_job_status(conn, job_id, printer_name):
                             current_error = "Out of ink or ink cartridge missing"
                         elif "input-tray-missing" in reasons:
                             current_error = "Paper casette missing or incorrectly inserted"
+                        elif "media-jam-error" in reasons:
+                            current_error = "Paper jam"
                         if current_error is not None and last_error != current_error:
                             print(current_error)
                             last_error = current_error
