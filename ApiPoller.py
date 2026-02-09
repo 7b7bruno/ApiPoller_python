@@ -790,12 +790,13 @@ def check_printer_reachable():
     with state_lock:
         previous_state = state
     while True:
-        if glob_module.glob("/dev/usb/lp*"):
+        usb_devices = glob_module.glob("/dev/usb/lp*")
+        if usb_devices:
             if status_sent:
                 with state_lock:
                     state = previous_state
                 send_status()
-                log_event("Printer USB device detected again")
+                log_event(f"Printer USB device detected again: {usb_devices}")
             return True
 
         with state_lock:
@@ -805,6 +806,8 @@ def check_printer_reachable():
             log_error("Printer unreachable: no USB device found at /dev/usb/lp*")
             send_status()
             status_sent = True
+        else:
+            log_event("Waiting for printer USB device...")
         time.sleep(5)
 
 def print_image(image_path):
