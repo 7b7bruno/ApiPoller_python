@@ -202,6 +202,7 @@ class State(enum.Enum):
     NO_CONNECTION = "No connection"
     CIRCUIT_BREAKER_OPEN = "Server down (circuit breaker open)"
     MODEM_REBOOTING = "Modem rebooting"
+    PRINTER_UNREACHABLE = "Printer unreachable"
 
 state = State.BOOTING
 state_before_connection_issue = None
@@ -516,7 +517,7 @@ def get_connection_type():
 
 def getInitialHeaders():
     with state_lock:
-        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.PAPER_JAM, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
+        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.PAPER_JAM, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING, State.PRINTER_UNREACHABLE]:
             status = state.value
         else:
             status = "Normal"
@@ -571,7 +572,7 @@ def getHeaders():
 
     # Got modem data successfully - build full headers
     with state_lock:
-        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.PAPER_JAM, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING]:
+        if state in [State.OUT_OF_INK, State.OUT_OF_PAPER, State.OUT_OF_INK_AND_PAPER, State.PAPER_JAM, State.BOOTING, State.WAITING_FOR_CUPS, State.ACKNOWLEDGING, State.PRINTER_UNREACHABLE]:
             status = state.value
         else:
             status = "Normal"
@@ -782,6 +783,32 @@ def send_status():
     except Exception as e:
         log_error(f"Failed to send printer status to server: {e}")
 
+def check_printer_reachable():
+    global state
+    printer_name = config["printer_name"]
+    status_sent = False
+    with state_lock:
+        previous_state = state
+    while True:
+        try:
+            attrs = cupsConn.getPrinterAttributes(printer_name)
+            if attrs.get("printer-is-accepting-jobs", False):
+                if status_sent:
+                    with state_lock:
+                        state = previous_state
+                    send_status()
+                return True
+        except Exception as e:
+            log_error(f"Printer unreachable: {e}")
+
+        with state_lock:
+            if state != State.PRINTER_UNREACHABLE:
+                state = State.PRINTER_UNREACHABLE
+        if not status_sent:
+            send_status()
+            status_sent = True
+        time.sleep(5)
+
 def print_image(image_path):
     log_event("Printing image...")
     if not os.path.exists(image_path):
@@ -791,6 +818,8 @@ def print_image(image_path):
     if cupsConn is None:
         log_error("CUPS connection not initialized, cannot print.")
         return None
+
+    check_printer_reachable()
 
     # Check if no_print mode is enabled (for testing without wasting supplies)
     if config.get("no_print", False):
@@ -1092,6 +1121,8 @@ def update_led_status():
                 set_led_color(0.2, 0.8, 1)  # Light blue (server down, circuit breaker open)
             case State.MODEM_REBOOTING:
                 set_led_color(0.8, 0, 1)  # Purple (modem rebooting)
+            case State.PRINTER_UNREACHABLE:
+                set_led_color(1, 0, 0)  # Red
             case State.BOOTING:
                 set_led_color(1, 1, 0)  # Yellow (initializing)
             case _:
@@ -1332,6 +1363,8 @@ if __name__ == "__main__":
     log_event("Servo initialized")
     init_CUPS()
     log_event("CUPS initialized")
+    check_printer_reachable()
+    log_event("Printer reachable")
     with state_lock:
         state = State.IDLE
     consecutive_errors = 0
