@@ -790,20 +790,27 @@ def check_printer_reachable():
     with state_lock:
         previous_state = state
     while True:
-        usb_devices = glob_module.glob("/dev/usb/lp*")
-        if usb_devices:
+        try:
+            result = subprocess.run(
+                ["lsusb"], capture_output=True, text=True, timeout=5
+            )
+            is_reachable = "CP1500" in result.stdout.lower()
+        except Exception:
+            is_reachable = False
+
+        if is_reachable:
             if status_sent:
                 with state_lock:
                     state = previous_state
                 send_status()
-                log_event(f"Printer USB device detected again: {usb_devices}")
+                log_event("Printer USB device detected again")
             return True
 
         with state_lock:
             if state != State.PRINTER_UNREACHABLE:
                 state = State.PRINTER_UNREACHABLE
         if not status_sent:
-            log_error("Printer unreachable: no USB device found at /dev/usb/lp*")
+            log_error("Printer unreachable: CP1500 not found in lsusb output")
             send_status()
             status_sent = True
         else:
