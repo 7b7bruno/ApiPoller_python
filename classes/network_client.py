@@ -294,9 +294,6 @@ class NetworkClient:
                     **kwargs
                 )
 
-                # Raise for HTTP errors (4xx, 5xx)
-                response.raise_for_status()
-
                 # Connection succeeded - restore state if we were in failed state
                 if self.connection_failed or self.connection_weak:
                     self.connection_failed = False

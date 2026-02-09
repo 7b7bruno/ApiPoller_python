@@ -134,21 +134,24 @@ class RecoveryManager:
                                operation_name: str,
                                ack_id: str,
                                ack_data: Dict[str, Any],
-                               retry_callback: Callable) -> bool:
+                               retry_callback: Callable,
+                               max_reboots: int = 5,
+                               initial_wait: int = 60,
+                               backoff_factor: float = 2.0,
+                               max_wait: int = 1800) -> bool:
         """
-        Handle failure of a critical operation with escalation.
-
-        Process:
-        1. Add to pending queue
-        2. Try modem reboot
-        3. Wait and retry operation
-        4. If still fails, reboot Pi
+        Handle failure of a critical operation by rebooting the modem
+        with exponential backoff until the operation succeeds.
 
         Args:
             operation_name: Name of the operation (for logging)
             ack_id: Unique identifier for the acknowledgment
             ack_data: Data needed to retry
             retry_callback: Function to call to retry the operation
+            max_reboots: Maximum number of modem reboot attempts
+            initial_wait: Seconds to wait after first reboot
+            backoff_factor: Multiplier for wait time between reboots
+            max_wait: Maximum wait time in seconds
 
         Returns:
             True if operation succeeded after recovery, False otherwise
@@ -158,29 +161,36 @@ class RecoveryManager:
         # Add to persistent queue
         self.add_pending_ack(ack_id, ack_data)
 
-        # First escalation: Modem reboot
-        if self.escalate_modem_reboot():
-            # Wait for modem to come back online
-            logging.info("Waiting 60s for modem to restart...")
-            time.sleep(60)
+        wait_time = initial_wait
 
-            # Retry the operation
-            try:
-                logging.info(f"Retrying {operation_name} after modem reboot...")
-                result = retry_callback()
-                if result:
-                    logging.info(f"{operation_name} succeeded after modem reboot")
-                    self.remove_pending_ack(ack_id)
-                    self.reset_escalation_state()
-                    return True
-            except Exception as e:
-                logging.error(f"{operation_name} still failing after modem reboot: {e}")
+        for attempt in range(max_reboots):
+            logging.warning(f"Modem reboot attempt {attempt + 1}/{max_reboots} for {operation_name}")
 
-        # Second escalation: Pi reboot
-        logging.warning(f"{operation_name} failed even after modem reboot. Initiating Pi reboot...")
-        self.escalate_pi_reboot()
+            # Reset so escalate_modem_reboot() allows another reboot
+            self.modem_rebooted = False
 
-        # If we reach here, reboot failed
+            if self.escalate_modem_reboot():
+                logging.info(f"Waiting {wait_time}s for modem to restart...")
+                time.sleep(wait_time)
+
+                # Retry the operation
+                try:
+                    logging.info(f"Retrying {operation_name} after modem reboot (attempt {attempt + 1})...")
+                    result = retry_callback()
+                    if result:
+                        logging.info(f"{operation_name} succeeded after modem reboot")
+                        self.remove_pending_ack(ack_id)
+                        self.reset_escalation_state()
+                        return True
+                except Exception as e:
+                    logging.error(f"{operation_name} still failing after modem reboot: {e}")
+
+                # Exponential backoff for next attempt
+                wait_time = min(wait_time * backoff_factor, max_wait)
+            else:
+                logging.error(f"Failed to trigger modem reboot on attempt {attempt + 1}")
+
+        logging.error(f"{operation_name} failed after {max_reboots} modem reboot attempts. Giving up.")
         return False
 
     def retry_pending_acks(self, retry_callback: Callable[[str, Dict], bool]):
