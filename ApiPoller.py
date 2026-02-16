@@ -1355,7 +1355,13 @@ def init_CUPS():
 
 def clear_all_print_jobs():
     cupsConn = cups.Connection()
-    cupsConn.cancelAllJobs()
+    jobs = cupsConn.getJobs(which_jobs='not-completed')
+
+    if jobs:
+        log_event("Print job(s) found in queue, canceling...")
+        cupsConn.cancelAllJobs()
+    else:
+        log_event("No existing print jobs found.")
 
 if __name__ == "__main__":
     log_event(f"GPK {VERSION} started")
