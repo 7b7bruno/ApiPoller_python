@@ -1361,7 +1361,7 @@ def clear_all_print_jobs():
         log_event("Print job(s) found in queue, canceling...")
         i = 0
         for job_id in jobs:
-            cupsConn.cancel(job_id)
+            cupsConn.cancelJob(job_id)
             i += 1
         log_event(f"Canceled {i} print jobs.")
     else:
