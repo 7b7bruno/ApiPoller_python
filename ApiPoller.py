@@ -666,9 +666,8 @@ def handle_message(config, data):
         ack_message(message_id)
         ack_complete_event.set()  # Signal that ACK is complete
     else:
-        log_error("Print tracking failed. Not raising flag. Ack'ing message")
+        log_error("Print job failed. Not ack'ing message.")
         handle_transmission_failure()
-        ack_message(message_id)
 
 def get_image(config, message_id):
     log_event("Getting image...")
@@ -1340,7 +1339,7 @@ def init_CUPS():
                 state = State.BOOTING
             if state_sent:
                 send_status()
-            return True
+            break
         except RuntimeError as e:
             print(f"Connection failed. {time.time() - start}s since start. Attempt [{attempt + 1}/{config['cups_retries']}]")
             if not state_sent:
@@ -1351,6 +1350,12 @@ def init_CUPS():
                 log_error("Cups hasn't started in 5 minutes. Rebooting...")
                 reboot()
             attempt += 1
+    clear_all_print_jobs()
+    return True
+
+def clear_all_print_jobs():
+    cupsConn = cups.Connection()
+    cupsConn.cancelAllJobs()
 
 if __name__ == "__main__":
     log_event(f"GPK {VERSION} started")
