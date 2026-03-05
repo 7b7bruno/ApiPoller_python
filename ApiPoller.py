@@ -236,8 +236,8 @@ def save_pending_collections():
     except Exception as e:
         log_error(f"Failed to save pending collections: {e}")
 
-# NeoPixel object
-neopixel = None
+# NeoPixel strip object
+neopixel_strip = None
 
 waiting_for_refill = False
 refill_type = None
@@ -1183,7 +1183,7 @@ def set_neopixel_color(red, green, blue):
     Args:
         red, green, blue: Float values 0.0-1.0
     """
-    if neopixel is None:
+    if neopixel_strip is None:
         return
 
     # Convert 0.0-1.0 float to 0-255 int
@@ -1191,8 +1191,8 @@ def set_neopixel_color(red, green, blue):
     g = int(green * 255)
     b = int(blue * 255)
 
-    neopixel.set_all(r, g, b)
-    neopixel.show()
+    neopixel_strip.set_all(r, g, b)
+    neopixel_strip.show()
 
 # Function to update LED status based on flag state
 def update_led_status():
@@ -1238,15 +1238,15 @@ def update_led_status():
         time.sleep(0.5)
 
 def init_led():
-    global neopixel
-    neopixel = NeoPixelStrip(
+    global neopixel_strip
+    neopixel_strip = NeoPixelStrip(
         gpio_pin=config["neopixel_pin"],
         num_pixels=config["neopixel_count"],
         brightness=config["neopixel_brightness"]
     )
 
     # Clear LEDs initially
-    neopixel.clear()
+    neopixel_strip.clear()
 
     led_thread = threading.Thread(target=update_led_status, daemon=True)
     led_thread.start()
