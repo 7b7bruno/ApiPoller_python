@@ -63,16 +63,6 @@ DEFAULT_CONFIG = {
     "image_path": "images/",
     "paper_capacity": 18,
     "ink_capacity": 54,
-    "led_pins": {
-        "red": 23,
-        "green": 15,
-        "blue": 18
-    },
-    "paper_led_pins": {
-        "red": 13,
-        "green": 19,
-        "blue": 26
-    },
     "paper_led": False,
     "servo_pin": 14,
     "button_pin": 24,
