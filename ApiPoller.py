@@ -11,7 +11,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from gpiozero import AngularServo, Button # type: ignore
 import serial  # type: ignore
-import pigpio  # type: ignore
+import board  # type: ignore
+import neopixel  # type: ignore
 import cups
 import traceback
 import enum
@@ -131,11 +132,11 @@ class Route:
     gateway: str
 
 
-class NeoPixel:
+class NeoPixelStrip:
     """
-    NeoPixel (WS281x) controller using pigpio.
+    NeoPixel (WS281x) controller using Adafruit CircuitPython library.
 
-    Requires pigpio daemon to be running: sudo pigpiod
+    Simple wrapper around adafruit-circuitpython-neopixel.
     """
     def __init__(self, gpio_pin: int, num_pixels: int, brightness: float = 1.0):
         """
@@ -146,20 +147,26 @@ class NeoPixel:
             num_pixels: Number of LEDs in the strip
             brightness: Global brightness (0.0 to 1.0)
         """
-        self.gpio_pin = gpio_pin
+        # Map GPIO pin number to board pin
+        pin_map = {
+            18: board.D18,
+            12: board.D12,
+            21: board.D21,
+            10: board.D10,
+        }
+
+        if gpio_pin not in pin_map:
+            raise ValueError(f"GPIO pin {gpio_pin} not supported. Use 18, 12, 21, or 10.")
+
+        # Initialize the NeoPixel strip
+        self.pixels = neopixel.NeoPixel(
+            pin_map[gpio_pin],
+            num_pixels,
+            brightness=max(0.0, min(1.0, brightness)),
+            auto_write=False,
+            pixel_order=neopixel.GRB
+        )
         self.num_pixels = num_pixels
-        self.brightness = max(0.0, min(1.0, brightness))
-
-        # Connect to pigpio daemon
-        self.pi = pigpio.pi()
-        if not self.pi.connected:
-            raise RuntimeError("Failed to connect to pigpio daemon. Is pigpiod running?")
-
-        # Initialize pixel buffer (GRB order for WS281x)
-        self.pixels = [(0, 0, 0)] * num_pixels
-
-        # Set up GPIO for NeoPixel output
-        self.pi.set_mode(gpio_pin, pigpio.OUTPUT)
 
     def set_pixel(self, pixel_num: int, red: int, green: int, blue: int):
         """
@@ -179,71 +186,23 @@ class NeoPixel:
         Args:
             red, green, blue: Color values (0-255)
         """
-        for i in range(self.num_pixels):
-            self.pixels[i] = (red, green, blue)
+        self.pixels.fill((red, green, blue))
 
     def show(self):
         """
         Update the LED strip with buffered pixel data.
-
-        Sends data to WS281x LEDs via pigpio waveform.
         """
-        # Build bit stream for WS281x protocol
-        # T0H: 0.4us, T0L: 0.85us  →  Bit 0
-        # T1H: 0.8us, T1L: 0.45us  →  Bit 1
-
-        wf = []
-
-        for pixel in self.pixels:
-            # Apply brightness and convert to 8-bit GRB order
-            r = int(pixel[0] * self.brightness)
-            g = int(pixel[1] * self.brightness)
-            b = int(pixel[2] * self.brightness)
-
-            # WS281x uses GRB order
-            grb = (g << 16) | (r << 8) | b
-
-            # Send 24 bits (GRB)
-            for i in range(23, -1, -1):
-                bit = (grb >> i) & 1
-
-                if bit:
-                    # Bit 1: 0.8us high, 0.45us low
-                    wf.append(pigpio.pulse(1 << self.gpio_pin, 0, 800))  # 0.8us high
-                    wf.append(pigpio.pulse(0, 1 << self.gpio_pin, 450))  # 0.45us low
-                else:
-                    # Bit 0: 0.4us high, 0.85us low
-                    wf.append(pigpio.pulse(1 << self.gpio_pin, 0, 400))  # 0.4us high
-                    wf.append(pigpio.pulse(0, 1 << self.gpio_pin, 850))  # 0.85us low
-
-        # Send reset (>50us low)
-        wf.append(pigpio.pulse(0, 1 << self.gpio_pin, 60))
-
-        # Clear any existing waveforms
-        self.pi.wave_clear()
-
-        # Add pulses to waveform
-        self.pi.wave_add_generic(wf)
-
-        # Create and transmit waveform
-        wave_id = self.pi.wave_create()
-        if wave_id >= 0:
-            self.pi.wave_send_once(wave_id)
-            # Wait for transmission to complete
-            while self.pi.wave_tx_busy():
-                time.sleep(0.001)
-            self.pi.wave_delete(wave_id)
+        self.pixels.show()
 
     def clear(self):
         """Turn off all LEDs."""
-        self.set_all(0, 0, 0)
-        self.show()
+        self.pixels.fill((0, 0, 0))
+        self.pixels.show()
 
     def cleanup(self):
         """Clean up GPIO resources."""
         self.clear()
-        if self.pi.connected:
-            self.pi.stop()
+        self.pixels.deinit()
 
 
 VERSION = "V0.3.6"
@@ -1280,7 +1239,7 @@ def update_led_status():
 
 def init_led():
     global neopixel
-    neopixel = NeoPixel(
+    neopixel = NeoPixelStrip(
         gpio_pin=config["neopixel_pin"],
         num_pixels=config["neopixel_count"],
         brightness=config["neopixel_brightness"]
