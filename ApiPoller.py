@@ -9,8 +9,9 @@ from PIL import Image
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from gpiozero import AngularServo, Button, PWMLED # type: ignore
+from gpiozero import AngularServo, Button # type: ignore
 import serial  # type: ignore
+import pigpio  # type: ignore
 import cups
 import traceback
 import enum
@@ -63,7 +64,9 @@ DEFAULT_CONFIG = {
     "image_path": "images/",
     "paper_capacity": 18,
     "ink_capacity": 54,
-    "paper_led": False,
+    "neopixel_pin": 18,
+    "neopixel_count": 3,
+    "neopixel_brightness": 0.5,
     "servo_pin": 14,
     "button_pin": 24,
     "flag_down_angle": 180,
@@ -127,6 +130,122 @@ class Route:
     metric: int
     gateway: str
 
+
+class NeoPixel:
+    """
+    NeoPixel (WS281x) controller using pigpio.
+
+    Requires pigpio daemon to be running: sudo pigpiod
+    """
+    def __init__(self, gpio_pin: int, num_pixels: int, brightness: float = 1.0):
+        """
+        Initialize NeoPixel controller.
+
+        Args:
+            gpio_pin: GPIO pin number (BCM numbering)
+            num_pixels: Number of LEDs in the strip
+            brightness: Global brightness (0.0 to 1.0)
+        """
+        self.gpio_pin = gpio_pin
+        self.num_pixels = num_pixels
+        self.brightness = max(0.0, min(1.0, brightness))
+
+        # Connect to pigpio daemon
+        self.pi = pigpio.pi()
+        if not self.pi.connected:
+            raise RuntimeError("Failed to connect to pigpio daemon. Is pigpiod running?")
+
+        # Initialize pixel buffer (GRB order for WS281x)
+        self.pixels = [(0, 0, 0)] * num_pixels
+
+        # Set up GPIO for NeoPixel output
+        self.pi.set_mode(gpio_pin, pigpio.OUTPUT)
+
+    def set_pixel(self, pixel_num: int, red: int, green: int, blue: int):
+        """
+        Set a single pixel color (0-255 for each channel).
+
+        Args:
+            pixel_num: Pixel index (0-based)
+            red, green, blue: Color values (0-255)
+        """
+        if 0 <= pixel_num < self.num_pixels:
+            self.pixels[pixel_num] = (red, green, blue)
+
+    def set_all(self, red: int, green: int, blue: int):
+        """
+        Set all pixels to the same color.
+
+        Args:
+            red, green, blue: Color values (0-255)
+        """
+        for i in range(self.num_pixels):
+            self.pixels[i] = (red, green, blue)
+
+    def show(self):
+        """
+        Update the LED strip with buffered pixel data.
+
+        Sends data to WS281x LEDs via pigpio waveform.
+        """
+        # Build bit stream for WS281x protocol
+        # T0H: 0.4us, T0L: 0.85us  →  Bit 0
+        # T1H: 0.8us, T1L: 0.45us  →  Bit 1
+
+        wf = []
+
+        for pixel in self.pixels:
+            # Apply brightness and convert to 8-bit GRB order
+            r = int(pixel[0] * self.brightness)
+            g = int(pixel[1] * self.brightness)
+            b = int(pixel[2] * self.brightness)
+
+            # WS281x uses GRB order
+            grb = (g << 16) | (r << 8) | b
+
+            # Send 24 bits (GRB)
+            for i in range(23, -1, -1):
+                bit = (grb >> i) & 1
+
+                if bit:
+                    # Bit 1: 0.8us high, 0.45us low
+                    wf.append(pigpio.pulse(1 << self.gpio_pin, 0, 800))  # 0.8us high
+                    wf.append(pigpio.pulse(0, 1 << self.gpio_pin, 450))  # 0.45us low
+                else:
+                    # Bit 0: 0.4us high, 0.85us low
+                    wf.append(pigpio.pulse(1 << self.gpio_pin, 0, 400))  # 0.4us high
+                    wf.append(pigpio.pulse(0, 1 << self.gpio_pin, 850))  # 0.85us low
+
+        # Send reset (>50us low)
+        wf.append(pigpio.pulse(0, 1 << self.gpio_pin, 60))
+
+        # Clear any existing waveforms
+        self.pi.wave_clear()
+
+        # Add pulses to waveform
+        self.pi.wave_add_generic(wf)
+
+        # Create and transmit waveform
+        wave_id = self.pi.wave_create()
+        if wave_id >= 0:
+            self.pi.wave_send_once(wave_id)
+            # Wait for transmission to complete
+            while self.pi.wave_tx_busy():
+                time.sleep(0.001)
+            self.pi.wave_delete(wave_id)
+
+    def clear(self):
+        """Turn off all LEDs."""
+        self.set_all(0, 0, 0)
+        self.show()
+
+    def cleanup(self):
+        """Clean up GPIO resources."""
+        self.clear()
+        if self.pi.connected:
+            self.pi.stop()
+
+
 VERSION = "V0.3.6"
 
 last_successful_request = time.time()
@@ -158,13 +277,8 @@ def save_pending_collections():
     except Exception as e:
         log_error(f"Failed to save pending collections: {e}")
 
-# LED OutputDevice objects
-led_red = None
-led_green = None
-led_blue = None
-paper_led_red = None
-paper_led_green = None
-paper_led_blue = None
+# NeoPixel object
+neopixel = None
 
 waiting_for_refill = False
 refill_type = None
@@ -1102,11 +1216,24 @@ def set_servo_angle(angle):
 
             log_verbose("set_servo_angle completed")
 
-# Function to control LED color with PWM (0.0-1.0 for each channel)
-def set_led_color(red, green, blue):
-    led_red.value = red
-    led_green.value = green
-    led_blue.value = blue
+# Function to control NeoPixel color (0.0-1.0 for each channel)
+def set_neopixel_color(red, green, blue):
+    """
+    Set all NeoPixels to the same color.
+
+    Args:
+        red, green, blue: Float values 0.0-1.0
+    """
+    if neopixel is None:
+        return
+
+    # Convert 0.0-1.0 float to 0-255 int
+    r = int(red * 255)
+    g = int(green * 255)
+    b = int(blue * 255)
+
+    neopixel.set_all(r, g, b)
+    neopixel.show()
 
 # Function to update LED status based on flag state
 def update_led_status():
@@ -1117,74 +1244,54 @@ def update_led_status():
 
         match current_state:
             case State.IDLE:
-                set_led_color(0, 1, 0)  # Green
+                set_neopixel_color(0, 1, 0)  # Green
             case State.INCOMING_TRANSMISSION:
-                set_led_color(0, 0, 1)  # Blue
+                set_neopixel_color(0, 0, 1)  # Blue
             case State.MESSAGE_RECEIVED:
-                set_led_color(0, 1, 1)  # Cyan
+                set_neopixel_color(0, 1, 1)  # Cyan
             case State.ACKNOWLEDGING:
-                set_led_color(1, 1, 1)  # White
+                set_neopixel_color(1, 1, 1)  # White
             case State.OUT_OF_INK:
-                set_led_color(1, 0, 0)  # Red
+                set_neopixel_color(1, 0, 0)  # Red
             case State.OUT_OF_PAPER:
-                set_led_color(1, 0, 0)  # Red
+                set_neopixel_color(1, 0, 0)  # Red
             case State.OUT_OF_INK_AND_PAPER:
-                set_led_color(1, 0, 0)  # Red
+                set_neopixel_color(1, 0, 0)  # Red
             case State.PAPER_JAM:
-                set_led_color(1, 0, 0)  # Red
+                set_neopixel_color(1, 0, 0)  # Red
             case State.WAITING_FOR_CUPS:
-                set_led_color(1, 0, 1)  # Magenta
+                set_neopixel_color(1, 0, 1)  # Magenta
             case State.CONNECTION_WEAK:
-                set_led_color(1, 0.3, 0)  # Orange (network issues, retrying)
+                set_neopixel_color(1, 0.3, 0)  # Orange (network issues, retrying)
             case State.NO_CONNECTION:
-                set_led_color(1, 0, 0)  # Red (connection lost)
+                set_neopixel_color(1, 0, 0)  # Red (connection lost)
             case State.CIRCUIT_BREAKER_OPEN:
-                set_led_color(0.2, 0.8, 1)  # Light blue (server down, circuit breaker open)
+                set_neopixel_color(0.2, 0.8, 1)  # Light blue (server down, circuit breaker open)
             case State.MODEM_REBOOTING:
-                set_led_color(0.8, 0, 1)  # Purple (modem rebooting)
+                set_neopixel_color(0.8, 0, 1)  # Purple (modem rebooting)
             case State.PRINTER_UNREACHABLE:
-                set_led_color(1, 0, 0)  # Red
+                set_neopixel_color(1, 0, 0)  # Red
             case State.BOOTING:
-                set_led_color(1, 1, 0)  # Yellow (initializing)
+                set_neopixel_color(1, 1, 0)  # Yellow (initializing)
             case _:
-                set_led_color(0, 0, 0)  # Off (unknown state)
+                set_neopixel_color(0, 0, 0)  # Off (unknown state)
 
-        time.sleep(0.5)
-
-# Function to control paper LED color with PWM (0.0-1.0 for each channel)
-def set_paper_led_color(red, green, blue):
-    paper_led_red.value = red
-    paper_led_green.value = green
-    paper_led_blue.value = blue
-
-# Function to update LED status based on flag state
-def update_paper_led_status():
-    while True:
-        set_paper_led_color(1, 0, 0)
         time.sleep(0.5)
 
 def init_led():
-    global led_red, led_green, led_blue
-    led_red = PWMLED(config["led_pins"]["red"])
-    led_green = PWMLED(config["led_pins"]["green"])
-    led_blue = PWMLED(config["led_pins"]["blue"])
+    global neopixel
+    neopixel = NeoPixel(
+        gpio_pin=config["neopixel_pin"],
+        num_pixels=config["neopixel_count"],
+        brightness=config["neopixel_brightness"]
+    )
+
+    # Clear LEDs initially
+    neopixel.clear()
 
     led_thread = threading.Thread(target=update_led_status, daemon=True)
     led_thread.start()
 
-def init_paper_led():
-    global paper_led_red, paper_led_green, paper_led_blue
-    if config["paper_led"] == True:
-        paper_led_red = PWMLED(config["paper_led_pins"]["red"])
-        paper_led_green = PWMLED(config["paper_led_pins"]["green"])
-        paper_led_blue = PWMLED(config["paper_led_pins"]["blue"])
-
-        paper_led_thread = threading.Thread(target=update_paper_led_status, daemon=True)
-        paper_led_thread.start()
-
-        log_event("This model has an out-of-paper indicator light. It's been switched on.")
-    else:
-        log_event("This model does not have a paper indicator light.")
 
 def on_button_pressed():
     """Handle button press - signal flag thread or send pending collections."""
@@ -1392,8 +1499,7 @@ if __name__ == "__main__":
     init_GPIO()
     log_event("GPIO initialized")
     init_led()
-    init_paper_led()
-    log_event("LEDs initialized")
+    log_event("NeoPixels initialized")
     update_config()
     log_event("conf updated from server")
     init_servo()
