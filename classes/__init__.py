@@ -4,6 +4,6 @@ Classes module for GB Side Software.
 This module contains reusable classes for various hardware interfaces.
 """
 
-from .huawei_modem_reader import HuaweiModemReader
+from .quectel_modem_reader import QuectelModemReader
 
-__all__ = ['HuaweiModemReader']
+__all__ = ['QuectelModemReader']
