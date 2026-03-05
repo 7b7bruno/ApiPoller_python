@@ -1,31 +1,83 @@
 #!/usr/bin/env python3
 """
-Example code on how to reboot the modem:
-python3 reboot.py http://admin:PASSWORD@192.168.8.1/
+Example code on how to reboot the modem using AT commands.
+Usage: python3 reboot_modem.py
 """
-from huawei_lte_api.Connection import Connection # type: ignore
-from huawei_lte_api.Client import Client # type: ignore
-from huawei_lte_api.enums.client import ResponseEnum # type: ignore
-from huawei_lte_api.exceptions import ResponseErrorException # type: ignore
+import serial  # type: ignore
 import time
 
-URL = 'http://192.168.8.1'
+SERIAL_PORT = '/dev/ttyUSB2'
+BAUDRATE = 115200
 
-print("This util reboots the Huawei modem and waits until it comes online.")
+print("This util reboots the Quectel modem using AT commands and waits until it comes online.")
 
-with Connection(URL) as connection:
-    client = Client(connection)
-    print("Restarting modem...")
-    client.device.reboot()
+# Open serial connection
+ser = serial.Serial(
+    port=SERIAL_PORT,
+    baudrate=BAUDRATE,
+    timeout=5,
+    bytesize=serial.EIGHTBITS,
+    parity=serial.PARITY_NONE,
+    stopbits=serial.STOPBITS_ONE
+)
+
+try:
+    # Clear buffers
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+
+    print("Restarting modem with AT+CFUN=1,1...")
+    # Send reboot command (AT+CFUN=1,1 performs a full module reset)
+    ser.write(b"AT+CFUN=1,1\r\n")
+
+    # Read immediate response (may be OK or nothing as modem reboots)
+    time.sleep(0.5)
+    if ser.in_waiting > 0:
+        response = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+        print(f"Response: {response}")
+
     print("Waiting for modem to restart...")
     time.sleep(20)
+
+    # Close and reopen serial connection
+    ser.close()
+    time.sleep(2)
+
     print("Waiting for modem to come up...")
     while True:
         try:
-            connection.reload()
-            client.monitoring.status()
-            print("Modem booted!")
-            break
-        except ResponseErrorException as e:
-            print("Modem not available")
-            time.sleep(20)
+            # Attempt to reconnect
+            ser = serial.Serial(
+                port=SERIAL_PORT,
+                baudrate=BAUDRATE,
+                timeout=5,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE
+            )
+
+            # Clear buffers
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+
+            # Test with simple AT command
+            ser.write(b"AT\r\n")
+            time.sleep(0.5)
+
+            if ser.in_waiting > 0:
+                response = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+                if "OK" in response:
+                    print("Modem booted!")
+                    break
+
+            ser.close()
+            print("Modem not responding yet...")
+            time.sleep(5)
+
+        except Exception as e:
+            print(f"Waiting for modem... ({e})")
+            time.sleep(5)
+
+finally:
+    if ser.is_open:
+        ser.close()

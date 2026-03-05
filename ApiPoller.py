@@ -10,16 +10,14 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from gpiozero import AngularServo, Button, PWMLED # type: ignore
-from huawei_lte_api.Connection import Connection  # type: ignore
-from huawei_lte_api.Client import Client  # type: ignore
-from huawei_lte_api.enums.client import ResponseEnum  # type: ignore
+import serial  # type: ignore
 import cups
 import traceback
 import enum
 import math
 import glob as glob_module
 from dataclasses import dataclass
-from classes.huawei_modem_reader import HuaweiModemReader
+from classes.quectel_modem_reader import QuectelModemReader
 from classes.network_client import NetworkClient
 from classes.recovery_manager import RecoveryManager
 
@@ -49,7 +47,8 @@ DEFAULT_CONFIG = {
     "modem_restart_url": "/printer/modem-restart",
     "auth_check_url": "/auth/check",
     "collection_url": "/message/collected",
-    "modem_gateway_url": "http://192.168.8.1",
+    "modem_serial_port": "/dev/ttyUSB2",
+    "modem_baudrate": 115200,
     "print_command": "/snap/bin/cups.lp",
     "printer_name": "Canon_SELPHY_CP1500",
     "initial_delay": 10,
@@ -387,31 +386,56 @@ def reboot_modem():
         state_before_modem_reboot = state
         state = State.MODEM_REBOOTING
 
+    ser = None
     try:
-        log_event("Rebooting modem...")
+        log_event("Rebooting modem with AT+CFUN=1,1...")
 
-        with Connection(config["modem_gateway_url"]) as connection:
-            client = Client(connection)
-            if client.device.reboot() == ResponseEnum.OK.value:
-                log_event("Modem reboot requested successfully.")
+        # Open serial connection
+        ser = serial.Serial(
+            port=config["modem_serial_port"],
+            baudrate=config["modem_baudrate"],
+            timeout=5,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE
+        )
 
-                # Wait for modem to fully boot up before resuming operations
-                modem_boot_time = config["modem_boot_time"]
-                log_event(f"Waiting {modem_boot_time}s for modem to boot...")
-                time.sleep(modem_boot_time)
-                log_event("Modem should be ready now")
+        # Clear buffers
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
 
-                # Restore previous state
-                with state_lock:
-                    state = state_before_modem_reboot
-            else:
-                log_error("Modem reboot failed.")
-                with state_lock:
-                    state = state_before_modem_reboot
+        # Send reboot command (AT+CFUN=1,1 performs a full module reset)
+        ser.write(b"AT+CFUN=1,1\r\n")
+
+        # Read immediate response (may be OK or nothing as modem reboots)
+        time.sleep(0.5)
+        if ser.in_waiting > 0:
+            response = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+            log_verbose(f"Modem response: {response}")
+
+        log_event("Modem reboot command sent successfully.")
+
+        # Close serial connection before modem reboots
+        ser.close()
+        ser = None
+
+        # Wait for modem to fully boot up before resuming operations
+        modem_boot_time = config["modem_boot_time"]
+        log_event(f"Waiting {modem_boot_time}s for modem to boot...")
+        time.sleep(modem_boot_time)
+        log_event("Modem should be ready now")
+
+        # Restore previous state
+        with state_lock:
+            state = state_before_modem_reboot
+
     except Exception as e:
         log_error(f"Error rebooting modem: {e}")
         with state_lock:
             state = state_before_modem_reboot
+    finally:
+        if ser is not None and ser.is_open:
+            ser.close()
 
 def init_config():
     global config
@@ -553,7 +577,7 @@ def getHeaders():
 
     def _read_modem_data():
         """Helper function to read modem data (for timeout wrapping)."""
-        with HuaweiModemReader(config["modem_gateway_url"], timeout=timeout_seconds) as reader:
+        with QuectelModemReader(config["modem_serial_port"], config["modem_baudrate"], timeout=timeout_seconds) as reader:
             return reader.get_signal_data()
 
     try:
