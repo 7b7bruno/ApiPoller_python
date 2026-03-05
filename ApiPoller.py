@@ -239,6 +239,11 @@ def save_pending_collections():
 # NeoPixel strip object
 neopixel_strip = None
 
+# Modem signal data caching (for network status LED)
+cached_modem_signal_data = None
+last_modem_read_time = 0
+MODEM_READ_INTERVAL = 5  # seconds
+
 waiting_for_refill = False
 refill_type = None
 
@@ -1175,65 +1180,133 @@ def set_servo_angle(angle):
 
             log_verbose("set_servo_angle completed")
 
-# Function to control NeoPixel color (0.0-1.0 for each channel)
-def set_neopixel_color(red, green, blue):
-    """
-    Set all NeoPixels to the same color.
+# Helper functions for 3-pixel status display
 
-    Args:
-        red, green, blue: Float values 0.0-1.0
+def get_printer_status_color(current_state):
+    """
+    Get color for Pixel 0 (Printer Status).
+
+    Returns:
+        tuple: (red, green, blue) as 0-255 int values
+    """
+    if current_state in [State.OUT_OF_PAPER]:
+        return (255, 255, 0)  # Yellow - Out of paper
+    elif current_state in [State.OUT_OF_INK]:
+        return (255, 0, 0)  # Red - Out of ink
+    elif current_state in [State.OUT_OF_INK_AND_PAPER]:
+        return (255, 0, 0)  # Red - Out of both
+    elif current_state in [State.PAPER_JAM]:
+        return (255, 0, 0)  # Red - Paper jam
+    elif current_state in [State.PRINTER_UNREACHABLE]:
+        return (255, 0, 0)  # Red - Printer unreachable
+    elif current_state in [State.BOOTING, State.WAITING_FOR_CUPS]:
+        return (0, 0, 0)  # Off - System not ready
+    else:
+        # Printer OK (IDLE, INCOMING_TRANSMISSION, MESSAGE_RECEIVED, ACKNOWLEDGING, etc.)
+        return (0, 255, 0)  # Green - All good
+
+
+def get_network_status_color():
+    """
+    Get color for Pixel 1 (Network Status) based on signal metrics.
+
+    Returns:
+        tuple: (red, green, blue) as 0-255 int values
+    """
+    global cached_modem_signal_data, last_modem_read_time
+
+    # Try to read modem data if cache is stale
+    current_time = time.time()
+    if cached_modem_signal_data is None or (current_time - last_modem_read_time) > MODEM_READ_INTERVAL:
+        try:
+            connection_type = get_connection_type()
+            if connection_type != "wifi":
+                with QuectelModemReader(config["modem_serial_port"], config["modem_baudrate"], timeout=1) as reader:
+                    cached_modem_signal_data = reader.get_signal_data()
+                    last_modem_read_time = current_time
+            else:
+                # WiFi connection - show as green (good)
+                cached_modem_signal_data = {"rsrp": -80}  # Fake good signal for WiFi
+                last_modem_read_time = current_time
+        except Exception as e:
+            # Modem read failed - network issue
+            log_verbose(f"Network LED: Modem read failed: {e}")
+            return (255, 0, 0)  # Red - No network
+
+    if cached_modem_signal_data is None:
+        return (255, 0, 0)  # Red - No network data
+
+    # Get RSRP value
+    rsrp = cached_modem_signal_data.get('rsrp')
+    if rsrp is None:
+        return (255, 0, 0)  # Red - No signal data
+
+    # Map RSRP to colors
+    if rsrp >= -90:
+        return (0, 255, 0)  # Green - Excellent (>= -90 dBm)
+    elif rsrp >= -100:
+        return (0, 255, 255)  # Cyan - Good (-90 to -100 dBm)
+    elif rsrp >= -110:
+        return (255, 255, 0)  # Yellow - Fair (-100 to -110 dBm)
+    else:
+        return (255, 128, 0)  # Orange - Poor (< -110 dBm)
+
+
+def get_system_status_color(current_state):
+    """
+    Get color for Pixel 2 (System Status).
+
+    Returns:
+        tuple: (red, green, blue) as 0-255 int values
+    """
+    color_map = {
+        State.IDLE: (0, 255, 0),  # Green
+        State.INCOMING_TRANSMISSION: (0, 0, 255),  # Blue
+        State.MESSAGE_RECEIVED: (0, 255, 255),  # Cyan
+        State.ACKNOWLEDGING: (255, 255, 255),  # White
+        State.OUT_OF_INK: (0, 255, 0),  # Green (printer issue shown on pixel 0)
+        State.OUT_OF_PAPER: (0, 255, 0),  # Green (printer issue shown on pixel 0)
+        State.OUT_OF_INK_AND_PAPER: (0, 255, 0),  # Green (printer issue shown on pixel 0)
+        State.PAPER_JAM: (0, 255, 0),  # Green (printer issue shown on pixel 0)
+        State.WAITING_FOR_CUPS: (255, 0, 255),  # Magenta
+        State.CONNECTION_WEAK: (255, 77, 0),  # Orange
+        State.NO_CONNECTION: (255, 0, 0),  # Red
+        State.CIRCUIT_BREAKER_OPEN: (51, 204, 255),  # Light blue
+        State.MODEM_REBOOTING: (204, 0, 255),  # Purple
+        State.PRINTER_UNREACHABLE: (0, 255, 0),  # Green (printer issue shown on pixel 0)
+        State.BOOTING: (255, 255, 0),  # Yellow
+    }
+
+    return color_map.get(current_state, (0, 0, 0))  # Off if unknown
+
+
+# Function to update LED status based on state
+def update_led_status():
+    """
+    Update all 3 NeoPixel LEDs with independent status information:
+    - Pixel 0: Printer status
+    - Pixel 1: Network status
+    - Pixel 2: System status
     """
     if neopixel_strip is None:
         return
 
-    # Convert 0.0-1.0 float to 0-255 int
-    r = int(red * 255)
-    g = int(green * 255)
-    b = int(blue * 255)
-
-    neopixel_strip.set_all(r, g, b)
-    neopixel_strip.show()
-
-# Function to update LED status based on flag state
-def update_led_status():
-    global flag_raised
     while True:
         with state_lock:
             current_state = state
 
-        match current_state:
-            case State.IDLE:
-                set_neopixel_color(0, 1, 0)  # Green
-            case State.INCOMING_TRANSMISSION:
-                set_neopixel_color(0, 0, 1)  # Blue
-            case State.MESSAGE_RECEIVED:
-                set_neopixel_color(0, 1, 1)  # Cyan
-            case State.ACKNOWLEDGING:
-                set_neopixel_color(1, 1, 1)  # White
-            case State.OUT_OF_INK:
-                set_neopixel_color(1, 0, 0)  # Red
-            case State.OUT_OF_PAPER:
-                set_neopixel_color(1, 0, 0)  # Red
-            case State.OUT_OF_INK_AND_PAPER:
-                set_neopixel_color(1, 0, 0)  # Red
-            case State.PAPER_JAM:
-                set_neopixel_color(1, 0, 0)  # Red
-            case State.WAITING_FOR_CUPS:
-                set_neopixel_color(1, 0, 1)  # Magenta
-            case State.CONNECTION_WEAK:
-                set_neopixel_color(1, 0.3, 0)  # Orange (network issues, retrying)
-            case State.NO_CONNECTION:
-                set_neopixel_color(1, 0, 0)  # Red (connection lost)
-            case State.CIRCUIT_BREAKER_OPEN:
-                set_neopixel_color(0.2, 0.8, 1)  # Light blue (server down, circuit breaker open)
-            case State.MODEM_REBOOTING:
-                set_neopixel_color(0.8, 0, 1)  # Purple (modem rebooting)
-            case State.PRINTER_UNREACHABLE:
-                set_neopixel_color(1, 0, 0)  # Red
-            case State.BOOTING:
-                set_neopixel_color(1, 1, 0)  # Yellow (initializing)
-            case _:
-                set_neopixel_color(0, 0, 0)  # Off (unknown state)
+        # Get colors for each pixel
+        printer_color = get_printer_status_color(current_state)
+        network_color = get_network_status_color()
+        system_color = get_system_status_color(current_state)
+
+        # Update each pixel independently
+        neopixel_strip.set_pixel(0, printer_color[0], printer_color[1], printer_color[2])
+        neopixel_strip.set_pixel(1, network_color[0], network_color[1], network_color[2])
+        neopixel_strip.set_pixel(2, system_color[0], system_color[1], system_color[2])
+
+        # Show the updated pixels
+        neopixel_strip.show()
 
         time.sleep(0.5)
 
