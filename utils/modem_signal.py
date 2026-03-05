@@ -6,6 +6,13 @@ Example usage:
 python3 modem_signal.py
 """
 
+import sys
+import os
+from pathlib import Path
+
+# Add parent directory to path so we can import from classes
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from argparse import ArgumentParser
 from classes.quectel_modem_reader import QuectelModemReader
 import re
